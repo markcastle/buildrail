@@ -372,8 +372,13 @@ fn pin_saves_then_refreshes_and_edits_are_atomic() {
 
     let on_disk = t.paths.profile_store().load().unwrap();
     assert_eq!(on_disk, *t.app.profile());
-    let strip = t.wait_for("keevoro failed", |s| {
+    // Both requests are fetched concurrently, so wait for both to land
+    // rather than assuming the second has finished when the first has.
+    let strip = t.wait_for("keevoro failed and billing empty", |s| {
         s.entries.first().is_some_and(|e| e.status_text == "Failed")
+            && s.entries
+                .get(1)
+                .is_some_and(|e| e.status_text == "No runs yet")
     });
     assert_eq!(strip.entries[1].status_text, "No runs yet");
 

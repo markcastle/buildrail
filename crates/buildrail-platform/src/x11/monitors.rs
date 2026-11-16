@@ -105,20 +105,17 @@ impl MonitorSource for X11Monitors {
 /// CARDINALs per desktop). Falls back to desktop 0 when `desktop` has no
 /// entry; `None` when the property is empty or malformed.
 pub fn workarea_for_desktop(values: &[u32], desktop: u32) -> Option<PhysicalRect> {
-    let chunks: Vec<&[u32]> = values.chunks_exact(4).collect();
-    let chunk = usize::try_from(desktop)
+    let (chunks, _) = values.as_chunks::<4>();
+    let [x, y, w, h] = usize::try_from(desktop)
         .ok()
         .and_then(|i| chunks.get(i))
         .or_else(|| chunks.first())?;
-    match chunk {
-        [x, y, w, h] => Some(PhysicalRect::new(
-            i32::try_from(*x).ok()?,
-            i32::try_from(*y).ok()?,
-            *w,
-            *h,
-        )),
-        _ => None,
-    }
+    Some(PhysicalRect::new(
+        i32::try_from(*x).ok()?,
+        i32::try_from(*y).ok()?,
+        *w,
+        *h,
+    ))
 }
 
 #[cfg(test)]
