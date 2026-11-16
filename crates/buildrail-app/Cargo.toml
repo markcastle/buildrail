@@ -1,0 +1,42 @@
+[package]
+name = "buildrail-app"
+description = "BuildRail desktop app: the 24 px build-status strip, its settings window and the composition root."
+version.workspace = true
+edition.workspace = true
+# eframe/egui 0.37 require Rust 1.95, above the workspace's 1.88.
+rust-version = "1.95"
+license.workspace = true
+
+[[bin]]
+name = "buildrail"
+path = "src/main.rs"
+
+[dependencies]
+buildrail-core.workspace = true
+buildrail-platform.workspace = true
+buildrail-profile.workspace = true
+buildrail-providers.workspace = true
+async-trait.workspace = true
+chrono.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber = { version = "0.3", default-features = false, features = ["env-filter", "fmt", "ansi", "std"] }
+raw-window-handle = { version = "0.6", features = ["std"] }
+tempfile = "3"
+eframe = { version = "0.37", default-features = false, features = [
+    "accesskit",
+    "default_fonts",
+    "glow",
+    "wgpu",
+    "wayland",
+    "x11",
+] }
+
+[dev-dependencies]
+egui_kittest = { version = "0.37", features = ["snapshot"] }
+image = { version = "0.25", default-features = false, features = ["png"] }
+tokio = { workspace = true, features = ["test-util"] }
+
+[lints]
+workspace = true

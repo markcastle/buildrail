@@ -1,0 +1,18 @@
+//! Pure view-models: what the strip shows, decided without a window.
+//!
+//! * [`strip`] – [`StripModel::build`] turns pinned watches + engine
+//!   snapshots into ordered [`StripEntry`]s (status word, icon shape, tone,
+//!   staleness note, detail lines, accessible name, run URL).
+//! * [`overflow`] – which entries fit the strip's width and what the
+//!   overflow button says.
+//! * [`text`] – relative ages and short commits.
+//!
+//! Nothing here depends on egui; the `ui` module draws these models.
+
+pub mod overflow;
+pub mod strip;
+pub mod text;
+
+pub use overflow::{fit, OverflowGroup, OverflowLayout};
+pub use strip::{provider_mark, IconKind, StripEntry, StripModel};
+pub use text::{age_long, age_short, short_commit};

@@ -71,11 +71,11 @@ jobs:
           path: lcov.info
 
   msrv:
-    name: Minimum supported Rust (1.88)
+    name: Minimum supported Rust (1.95)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.88
+      - uses: dtolnay/rust-toolchain@1.95
       - uses: Swatinem/rust-cache@v2
       - run: cargo check --workspace --all-targets
         env:

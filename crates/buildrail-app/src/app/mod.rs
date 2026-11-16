@@ -1,0 +1,13 @@
+//! The application service layer: the [`AppController`] and the bundle of
+//! ports ([`Services`]) it is built from.
+//!
+//! The controller is the only place that mutates the profile, the device
+//! preferences and the credential store, and the only owner of the refresh
+//! engine handle. The UI reads from it and sends it settings
+//! [`Command`](crate::settings::Command)s; it never touches a port directly.
+
+pub mod controller;
+pub mod ports;
+
+pub use controller::{AppController, RepaintFn};
+pub use ports::{Catalogs, CredentialStore, Services};
