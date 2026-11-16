@@ -1,0 +1,32 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "MIT"
+repository = "https://github.com/buildrail/buildrail"
+
+[workspace.dependencies]
+buildrail-core = { path = "crates/buildrail-core" }
+buildrail-profile = { path = "crates/buildrail-profile" }
+buildrail-providers = { path = "crates/buildrail-providers" }
+buildrail-platform = { path = "crates/buildrail-platform" }
+async-trait = "0.1"
+chrono = { version = "0.4", default-features = false, features = ["std", "clock", "serde"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+tracing = "0.1"
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+unwrap_used = "warn"
+expect_used = "warn"
