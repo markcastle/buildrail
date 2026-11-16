@@ -40,6 +40,18 @@ fn three_builds() -> Fixture {
     f
 }
 
+/// Waits until every entry of [`three_builds`] has its first result. The
+/// three requests are fetched concurrently, so one entry being loaded says
+/// nothing about the others.
+fn wait_all_loaded(h: &mut Harness<'_, BuildRailUi>) {
+    step_until(h, "all loaded", |h| {
+        h.query_by_label(KEEVORO).is_some()
+            && h.query_by_label_contains("Site, Cloudflare, Deployed")
+                .is_some()
+            && h.query_by_label("Docs, Cloudflare, No runs yet").is_some()
+    });
+}
+
 fn entries(h: &Harness<'_, BuildRailUi>) -> Vec<String> {
     labels_left_to_right(h, Role::Button)
         .into_iter()
@@ -82,7 +94,7 @@ fn entries_in_pinned_order_with_accessible_names() {
 fn order_is_stable_when_a_failed_build_is_rerun() {
     let f = three_builds();
     let mut h = f.harness([900.0, 24.0]);
-    step_until(&mut h, "loaded", |h| h.query_by_label(KEEVORO).is_some());
+    wait_all_loaded(&mut h);
     let before: Vec<String> = entries(&h)
         .iter()
         .map(|n| n.split(',').next().unwrap().to_owned())
@@ -110,7 +122,7 @@ fn order_is_stable_when_a_failed_build_is_rerun() {
 fn keyboard_focus_shows_details_and_enter_opens_the_run() {
     let f = three_builds();
     let mut h = f.harness([900.0, 24.0]);
-    step_until(&mut h, "loaded", |h| h.query_by_label(KEEVORO).is_some());
+    wait_all_loaded(&mut h);
 
     h.get_by_label(KEEVORO).focus();
     h.step();
@@ -147,7 +159,7 @@ fn keyboard_focus_shows_details_and_enter_opens_the_run() {
 fn offline_entry_shows_cached_state_with_age_then_recovers() {
     let f = three_builds();
     let mut h = f.harness([900.0, 24.0]);
-    step_until(&mut h, "loaded", |h| h.query_by_label(KEEVORO).is_some());
+    wait_all_loaded(&mut h);
 
     f.world.clock.advance(TimeDelta::minutes(5));
     f.world

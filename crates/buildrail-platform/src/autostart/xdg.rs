@@ -144,6 +144,8 @@ mod tests {
         }
     }
 
+    // XDG paths are Unix paths: "/cfg" is not absolute on Windows.
+    #[cfg(unix)]
     #[test]
     fn autostart_dir_resolution() {
         assert_eq!(
