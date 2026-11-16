@@ -2,6 +2,11 @@
 //! hands the command line to the composition root
 //! ([`buildrail_app::compose`]) and turns failures into an exit code.
 
+// A release build on Windows is a GUI program: without this, double-clicking
+// the exe would open a console window behind the strip. Debug builds keep the
+// console so `cargo run` still shows logs and `--help`.
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 use std::process::ExitCode;
 
 use buildrail_app::compose::{self, StartError};
