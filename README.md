@@ -146,6 +146,23 @@ cargo clippy --workspace --all-targets -- -D warnings
 
 Set `BUILDRAIL_CONFIG_DIR` to point the app at a scratch folder, so you can experiment without touching your real configuration.
 
+## Releasing
+
+The Release workflow builds the Windows executable.
+
+- **To try a build without releasing**, open the Actions tab, choose Release, and press "Run workflow". The zip is attached to the run as an artifact.
+- **To publish a release**, set the version in the root `Cargo.toml`, merge, then push a matching tag. The workflow refuses a tag that does not match the version.
+
+```bash
+git tag v0.1.0
+```
+
+```bash
+git push origin v0.1.0
+```
+
+The release gets a zip containing `buildrail.exe`, a `Try the demo.cmd` you can double-click to see the strip with made-up builds, and this README, plus a SHA-256 checksum. The exe is not code-signed, so Windows SmartScreen will warn the first time it runs.
+
 ## Acceptance checklist for each operating system
 
 These are the checks that cannot be automated here and need a person at a real desktop.
