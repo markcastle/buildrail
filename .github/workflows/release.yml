@@ -88,9 +88,16 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" \
-            --repo "$GITHUB_REPOSITORY" \
-            --title "BuildRail $GITHUB_REF_NAME" \
-            --generate-notes \
-            "${{ needs.windows.outputs.asset }}.zip" \
-            "${{ needs.windows.outputs.asset }}.zip.sha256"
+          zip="${{ needs.windows.outputs.asset }}.zip"
+          # The tag may have come from `git push` (no release yet) or from the
+          # "Draft a new release" page on GitHub (release already exists).
+          # Handle both: create it if missing, otherwise attach the files.
+          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --clobber "$zip" "$zip.sha256"
+          else
+            gh release create "$GITHUB_REF_NAME" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "BuildRail $GITHUB_REF_NAME" \
+              --generate-notes \
+              "$zip" "$zip.sha256"
+          fi
