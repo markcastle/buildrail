@@ -1,0 +1,24 @@
+[
+  {
+    "id": 1296269,
+    "name": "Hello-World",
+    "full_name": "octocat/Hello-World",
+    "owner": { "login": "octocat", "id": 1, "type": "User" },
+    "private": false,
+    "html_url": "https://github.com/octocat/Hello-World",
+    "description": "This your first repo!",
+    "fork": false,
+    "default_branch": "master",
+    "archived": false,
+    "pushed_at": "2026-10-06T21:30:37Z"
+  },
+  {
+    "id": 1296270,
+    "name": "secret-sauce",
+    "full_name": "octo-org/secret-sauce",
+    "owner": { "login": "octo-org", "id": 2, "type": "Organization" },
+    "private": true,
+    "default_branch": "main",
+    "archived": false
+  }
+]

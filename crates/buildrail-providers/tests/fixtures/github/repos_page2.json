@@ -1,0 +1,11 @@
+[
+  {
+    "id": 1296271,
+    "name": "old-thing",
+    "full_name": "octocat/old-thing",
+    "owner": { "login": "octocat", "id": 1, "type": "User" },
+    "private": false,
+    "default_branch": "main",
+    "archived": true
+  }
+]

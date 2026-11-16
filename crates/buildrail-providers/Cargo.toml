@@ -1,0 +1,26 @@
+[package]
+name = "buildrail-providers"
+description = "BuildRail provider adapters: GitHub Actions and Cloudflare Workers Builds over HTTPS."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+buildrail-core.workspace = true
+async-trait.workspace = true
+chrono.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+reqwest = { version = "0.13.5", default-features = false, features = ["rustls", "gzip", "json", "query", "http2", "charset"] }
+url = "2.5.8"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+wiremock = "0.6.5"
+
+[lints]
+workspace = true

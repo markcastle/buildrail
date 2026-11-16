@@ -1,0 +1,25 @@
+[package]
+name = "buildrail-profile"
+description = "BuildRail watch profile (versioned TOML), validation, import/export, device preferences and atomic file storage."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+buildrail-core.workspace = true
+directories = "6"
+serde.workspace = true
+serde_json.workspace = true
+tempfile = "3.27"
+thiserror.workspace = true
+toml = "1.1"
+tracing.workspace = true
+uuid = { version = "1.29", features = ["v4"] }
+
+[dev-dependencies]
+chrono.workspace = true
+proptest = "1.12"
+
+[lints]
+workspace = true

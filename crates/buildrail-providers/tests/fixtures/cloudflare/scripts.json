@@ -1,0 +1,30 @@
+{
+  "success": true,
+  "errors": [],
+  "messages": [],
+  "result": [
+    {
+      "id": "other-worker",
+      "tag": "ffffffffffffffffffffffffffffffff",
+      "created_on": "2025-01-01T00:00:00Z",
+      "modified_on": "2025-02-01T00:00:00Z",
+      "etag": "ea95132c15732412d22c1476fa83f27a",
+      "handlers": ["fetch"],
+      "has_assets": false,
+      "has_modules": true,
+      "usage_model": "standard"
+    },
+    {
+      "id": "my-worker",
+      "tag": "1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d",
+      "created_on": "2025-03-01T00:00:00Z",
+      "modified_on": "2026-11-16T10:12:00.123456Z",
+      "etag": "777f24a43bef5f69174aa69ceaf1dea67968d510a31d1vw3e49d34a0187c06d1",
+      "handlers": ["fetch", "scheduled"],
+      "has_assets": true,
+      "has_modules": true,
+      "compatibility_date": "2026-01-01",
+      "usage_model": "standard"
+    }
+  ]
+}

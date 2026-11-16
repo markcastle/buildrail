@@ -1,0 +1,98 @@
+{
+  "success": true,
+  "errors": [],
+  "messages": [],
+  "result": [
+    {
+      "build_uuid": "5e0c1a2b-0000-4000-8000-000000000001",
+      "status": "stopped",
+      "build_outcome": "success",
+      "created_on": "2026-11-16T10:00:00Z",
+      "initializing_on": "2026-11-16T10:00:01Z",
+      "running_on": "2026-11-16T10:00:05Z",
+      "stopped_on": "2026-11-16T10:02:00Z",
+      "modified_on": "2026-11-16T10:02:00.500Z",
+      "build_trigger_metadata": {
+        "build_trigger_source": "push",
+        "branch": "main",
+        "commit_hash": "abc123def456",
+        "commit_message": "Add new feature",
+        "author": "developer@example.com",
+        "build_command": "npm run build",
+        "deploy_command": "npx wrangler deploy",
+        "root_directory": "/",
+        "repo_name": "my-worker-repo",
+        "provider_account_name": "example",
+        "provider_type": "github"
+      },
+      "trigger": {
+        "trigger_uuid": "11111111-0000-4000-8000-000000000000",
+        "trigger_name": "Deploy default branch",
+        "external_script_id": "1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d",
+        "branch_includes": ["main"],
+        "branch_excludes": [],
+        "path_includes": ["*"],
+        "path_excludes": [],
+        "build_command": "npm run build",
+        "deploy_command": "npx wrangler deploy",
+        "root_directory": "/",
+        "build_caching_enabled": true
+      },
+      "pull_request": null,
+      "deploy_hook": null
+    },
+    {
+      "build_uuid": "5e0c1a2b-0000-4000-8000-000000000002",
+      "status": "stopped",
+      "build_outcome": "success",
+      "created_on": "2026-11-16T09:30:00Z",
+      "stopped_on": "2026-11-16T09:31:00Z",
+      "modified_on": "2026-11-16T09:31:00Z",
+      "build_trigger_metadata": {
+        "build_trigger_source": "push",
+        "branch": "feature/login",
+        "commit_hash": "fea7123",
+        "deploy_command": "npx wrangler versions upload",
+        "provider_type": "github"
+      },
+      "trigger": {
+        "trigger_uuid": "22222222-0000-4000-8000-000000000000",
+        "branch_includes": ["*"],
+        "branch_excludes": ["main"],
+        "deploy_command": "npx wrangler versions upload"
+      }
+    },
+    {
+      "build_uuid": "5e0c1a2b-0000-4000-8000-000000000003",
+      "status": "stopped",
+      "build_outcome": "fail",
+      "created_on": "2026-11-16T09:00:00Z",
+      "stopped_on": "2026-11-16T09:01:00Z",
+      "modified_on": "2026-11-16T09:01:00Z",
+      "build_trigger_metadata": {
+        "build_trigger_source": "push",
+        "branch": "main",
+        "commit_hash": "bad0001"
+      },
+      "trigger": {
+        "branch_includes": ["main"],
+        "branch_excludes": []
+      }
+    },
+    {
+      "build_uuid": "5e0c1a2b-0000-4000-8000-000000000004",
+      "status": "running",
+      "build_outcome": null,
+      "created_on": "2026-11-16T10:30:00Z",
+      "initializing_on": "2026-11-16T10:30:01Z",
+      "running_on": "2026-11-16T10:30:05Z",
+      "stopped_on": null,
+      "build_trigger_metadata": {
+        "build_trigger_source": "push",
+        "branch": "feature/login",
+        "commit_hash": "fea7124"
+      }
+    }
+  ],
+  "result_info": { "page": 1, "per_page": 10, "count": 4, "total_count": 4, "total_pages": 1 }
+}

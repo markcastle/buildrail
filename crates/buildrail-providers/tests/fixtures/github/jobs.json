@@ -1,0 +1,40 @@
+{
+  "total_count": 3,
+  "jobs": [
+    {
+      "id": 399444496,
+      "run_id": 30433642,
+      "run_attempt": 2,
+      "status": "completed",
+      "conclusion": "success",
+      "name": "lint",
+      "started_at": "2026-11-16T10:06:05Z",
+      "completed_at": "2026-11-16T10:07:00Z",
+      "html_url": "https://github.com/octo-org/octo-repo/runs/399444496",
+      "steps": [{ "name": "Set up job", "status": "completed", "conclusion": "success", "number": 1 }]
+    },
+    {
+      "id": 399444497,
+      "run_id": 30433642,
+      "run_attempt": 2,
+      "status": "completed",
+      "conclusion": "failure",
+      "name": "test (ubuntu-latest)",
+      "started_at": "2026-11-16T10:06:05Z",
+      "completed_at": "2026-11-16T10:09:00Z",
+      "html_url": "https://github.com/octo-org/octo-repo/runs/399444497",
+      "steps": [{ "name": "cargo test", "status": "completed", "conclusion": "failure", "number": 4 }]
+    },
+    {
+      "id": 399444498,
+      "run_id": 30433642,
+      "run_attempt": 2,
+      "status": "completed",
+      "conclusion": "failure",
+      "name": "test (windows-latest)",
+      "started_at": "2026-11-16T10:06:05Z",
+      "completed_at": "2026-11-16T10:09:20Z",
+      "html_url": "https://github.com/octo-org/octo-repo/runs/399444498"
+    }
+  ]
+}
