@@ -151,7 +151,9 @@ Set `BUILDRAIL_CONFIG_DIR` to point the app at a scratch folder, so you can expe
 The Release workflow builds the Windows executable.
 
 - **To try a build without releasing**, open the Actions tab, choose Release, and press "Run workflow". The zip is attached to the run as an artifact.
-- **To publish a release**, set the version in the root `Cargo.toml`, merge, then push a matching tag. The workflow refuses a tag that does not match the version.
+- **To publish a release**, set the version in the root `Cargo.toml`, merge, then create a matching tag. The workflow refuses a tag that does not match the version. You can create the tag either way:
+    - On GitHub: Releases, "Draft a new release", type the tag (for example `v0.1.0`), target `main`, and publish. The workflow attaches the zip a few minutes later.
+    - From a clone, with the two commands below.
 
 ```bash
 git tag v0.1.0
