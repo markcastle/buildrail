@@ -135,6 +135,7 @@ impl Autostart for XdgAutostart {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
     fn env<'a>(pairs: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<OsString> + 'a {
         move |k| {
             pairs
