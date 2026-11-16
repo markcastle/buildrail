@@ -57,6 +57,9 @@ jobs:
           fi
           mkdir "$name"
           cp target/release/buildrail.exe README.md "$name/"
+          # Double-click helper: the real strip against made-up builds, with
+          # no tokens, network or setup.
+          printf '@echo off\r\nstart "" "%%~dp0buildrail.exe" --demo\r\n' > "$name/Try the demo.cmd"
           7z a "$name.zip" "$name" > /dev/null
           sha256sum "$name.zip" > "$name.zip.sha256"
           echo "asset=$name" >> "$GITHUB_OUTPUT"

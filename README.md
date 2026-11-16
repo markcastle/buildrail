@@ -161,7 +161,7 @@ git tag v0.1.0
 git push origin v0.1.0
 ```
 
-The release gets a zip containing `buildrail.exe` and this README, plus a SHA-256 checksum. The exe is not code-signed, so Windows SmartScreen will warn the first time it runs.
+The release gets a zip containing `buildrail.exe`, a `Try the demo.cmd` you can double-click to see the strip with made-up builds, and this README, plus a SHA-256 checksum. The exe is not code-signed, so Windows SmartScreen will warn the first time it runs.
 
 ## Acceptance checklist for each operating system
 
