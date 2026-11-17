@@ -375,7 +375,15 @@ fn device_preferences_are_saved() {
     assert!(f.world.autostart.is_enabled().unwrap());
     assert_eq!(prefs.placement, Placement::Floating { position: None });
     assert_eq!(prefs.scale, Some(1.0));
-    click(&mut h, "Docked");
+    click(&mut h, "Top");
+    assert_eq!(
+        f.paths.device_prefs_store().load().unwrap().placement,
+        Placement::DockedTop
+    );
+    assert!(h
+        .query_by_label_contains("At the top or bottom, the strip sits along that edge")
+        .is_some());
+    click(&mut h, "Bottom");
     assert_eq!(
         f.paths.device_prefs_store().load().unwrap().placement,
         Placement::DockedBottom

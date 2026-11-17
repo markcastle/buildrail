@@ -2,23 +2,27 @@
 //!
 //! [`EdgeDock`] is the one trait the UI talks to. [`platform_dock`] returns
 //! the right implementation for the running OS; every call either reserves
-//! the bottom edge ([`DockOutcome::Reserved`]) or says, with a reason, that
-//! this desktop cannot ([`DockOutcome::Unsupported`]), in which case the UI
-//! shows the compact movable window instead (placed with
-//! [`crate::geometry::float_rect`]).
+//! the top or bottom edge ([`Edge`], [`DockOutcome::Reserved`]) or says,
+//! with a reason, that this desktop cannot ([`DockOutcome::Unsupported`]),
+//! in which case the UI shows the compact movable window instead (placed
+//! with [`crate::geometry::float_rect`], near the same edge).
 //!
 //! # Per-OS behaviour
 //!
-//! **Windows** – a real *AppBar* (`SHAppBarMessage`). The shell places the
-//! strip directly above the taskbar (or at the screen bottom when the
-//! taskbar is elsewhere) and shrinks the work area so maximised windows stop
-//! above the strip. The dock moves the window itself (`SetWindowPos`,
-//! topmost, no activation). Result: [`ReservationGuarantee::Enforced`].
-//! The space is given back on [`EdgeDock::release`] and on drop; if the
-//! process is killed, Explorer reclaims it when the window is destroyed.
+//! **Windows** – a real *AppBar* (`SHAppBarMessage`, `ABE_BOTTOM` or
+//! `ABE_TOP`). The shell places the strip directly above a bottom taskbar
+//! (below a top one, or at the screen edge when the taskbar is elsewhere)
+//! and shrinks the work area so maximised windows stay clear of the strip.
+//! The dock moves the window itself (`SetWindowPos`, topmost, no
+//! activation, posted to the window's thread) and then reads back where the
+//! window really is: every check puts it back on the reserved rect if
+//! anything moved or resized it (see [`appbar`]). Result:
+//! [`ReservationGuarantee::Enforced`]. The space is given back on
+//! [`EdgeDock::release`] and on drop; if the process is killed, Explorer
+//! reclaims it when the window is destroyed.
 //!
 //! **Linux/BSD on X11** – the window is marked `_NET_WM_WINDOW_TYPE_DOCK`,
-//! given `_NET_WM_STRUT_PARTIAL` and `_NET_WM_STRUT` for the bottom edge,
+//! given `_NET_WM_STRUT_PARTIAL` and `_NET_WM_STRUT` for its edge,
 //! made sticky (all workspaces) and kept above, and moved to the computed
 //! rect. Whether the work area actually shrinks is up to the window
 //! manager: GNOME/Mutter, KDE/KWin, Xfwm, Openbox, i3 and most others honour
@@ -57,16 +61,19 @@
 //! 2. Get the native handle with [`raw_window_handle_of`] (eframe's `Frame`
 //!    implements `HasWindowHandle`), pick the monitor (a [`crate::monitors::MonitorSource`]
 //!    or winit monitors + [`crate::geometry::resolve_monitor`]) and call
-//!    [`EdgeDock::reserve`] with [`crate::geometry::STRIP_HEIGHT_LOGICAL`].
+//!    [`EdgeDock::reserve`] with the [`Edge`] and
+//!    [`crate::geometry::STRIP_HEIGHT_LOGICAL`].
 //! 3. On `Reserved { rect, .. }` show the window. The dock has already
 //!    moved and sized it to `rect` (physical pixels); do not send position
 //!    or size viewport commands while docked. On `Unsupported` place the
 //!    floating window yourself and keep it movable.
 //! 4. Call [`EdgeDock::update`] when the scale factor or monitor layout
 //!    changes, **and every few seconds as a polling fallback** (it is cheap
-//!    and only re-applies when the rect changes). This is required on
-//!    Windows because eframe gives no direct access to the window
-//!    procedure, see below.
+//!    and only moves the window when it is not where it should be). This is
+//!    required on Windows because eframe gives no direct access to the
+//!    window procedure, see below. Call it straight away when the window's
+//!    scale factor or position changed: that is when a toolkit has resized
+//!    it.
 //! 5. Call [`EdgeDock::release`] before switching to the floating window
 //!    and on exit (it also runs on drop).
 //!
@@ -103,7 +110,7 @@
 //! covers it. Either way nothing breaks; the hook only makes the reaction
 //! faster.
 
-mod appbar;
+pub mod appbar;
 #[cfg(x11_platform)]
 mod linux;
 pub mod session;
@@ -117,34 +124,38 @@ use thiserror::Error;
 
 use crate::geometry::{dock_rect, MonitorInfo, PhysicalRect};
 
+pub use crate::geometry::Edge;
 pub use appbar::{
-    after_query, decode_notification, query_proposal, AppBarNotification, ABN_FULLSCREENAPP,
-    ABN_POSCHANGED, ABN_STATECHANGE, ABN_WINDOWARRANGE,
+    after_query, decode_notification, query_proposal, AppBar, AppBarNotification, AppBarShell,
+    AppBarWindow, Edges, ABN_FULLSCREENAPP, ABN_POSCHANGED, ABN_STATECHANGE, ABN_WINDOWARRANGE,
 };
 #[cfg(x11_platform)]
 pub use linux::LinuxDock;
 pub use window_ref::WindowRef;
 
-/// Reserves (or declines to reserve) the bottom screen edge for the strip.
+/// Reserves (or declines to reserve) a screen edge for the strip.
 /// See the module docs for per-OS behaviour and how the UI wires it.
 pub trait EdgeDock: Send {
-    /// Docks `window` at the bottom of `monitor`, `strip_height_logical`
+    /// Docks `window` on the `edge` of `monitor`, `strip_height_logical`
     /// logical pixels tall. Calling it again re-docks (for example on
-    /// another monitor).
+    /// another monitor): the same reservation moves, it is never made
+    /// twice.
     fn reserve(
         &mut self,
         window: RawWindowHandle,
         monitor: &MonitorInfo,
+        edge: Edge,
         strip_height_logical: u32,
     ) -> Result<DockOutcome, DockError>;
 
     /// Re-applies the reservation after a layout, taskbar or scale change,
-    /// or as a periodic poll. Only touches the window when the rect
-    /// changed. Fails with [`DockError::NotReserved`] before
-    /// [`EdgeDock::reserve`].
+    /// or as a periodic poll. Only reserves again when the rect changed,
+    /// and only moves the window when it is not on the reserved rect.
+    /// Fails with [`DockError::NotReserved`] before [`EdgeDock::reserve`].
     fn update(
         &mut self,
         monitor: &MonitorInfo,
+        edge: Edge,
         strip_height_logical: u32,
     ) -> Result<DockOutcome, DockError>;
 
@@ -167,7 +178,7 @@ pub trait EdgeDock: Send {
 /// What [`EdgeDock::reserve`] / [`EdgeDock::update`] achieved.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DockOutcome {
-    /// The bottom edge is reserved and the window has been moved to `rect`
+    /// The edge is reserved and the window has been moved to `rect`
     /// (physical pixels, global desktop coordinates).
     Reserved {
         /// Where the strip now is.
@@ -297,7 +308,7 @@ pub fn native_callback_message() -> Option<u32> {
 pub fn platform_dock() -> Box<dyn EdgeDock> {
     #[cfg(windows)]
     {
-        Box::new(crate::win32::appbar::WindowsAppBar::new())
+        Box::new(crate::win32::appbar::windows_appbar())
     }
     #[cfg(x11_platform)]
     {
@@ -332,6 +343,7 @@ impl EdgeDock for UnsupportedDock {
         &mut self,
         _: RawWindowHandle,
         _: &MonitorInfo,
+        _: Edge,
         _: u32,
     ) -> Result<DockOutcome, DockError> {
         Ok(DockOutcome::Unsupported {
@@ -339,7 +351,7 @@ impl EdgeDock for UnsupportedDock {
         })
     }
 
-    fn update(&mut self, _: &MonitorInfo, _: u32) -> Result<DockOutcome, DockError> {
+    fn update(&mut self, _: &MonitorInfo, _: Edge, _: u32) -> Result<DockOutcome, DockError> {
         Ok(DockOutcome::Unsupported {
             reason: self.reason,
         })
@@ -353,10 +365,12 @@ impl EdgeDock for UnsupportedDock {
 /// One call recorded by [`ScriptedDock`].
 #[derive(Debug, Clone, PartialEq)]
 pub enum DockCall {
-    /// [`EdgeDock::reserve`] on this monitor with this height.
+    /// [`EdgeDock::reserve`] on this monitor and edge with this height.
     Reserve {
         /// Monitor passed in.
         monitor: MonitorInfo,
+        /// Edge passed in.
+        edge: Edge,
         /// Strip height passed in.
         strip_height_logical: u32,
     },
@@ -364,6 +378,8 @@ pub enum DockCall {
     Update {
         /// Monitor passed in.
         monitor: MonitorInfo,
+        /// Edge passed in.
+        edge: Edge,
         /// Strip height passed in.
         strip_height_logical: u32,
     },
@@ -414,11 +430,11 @@ impl ScriptedDock {
             .push(call);
     }
 
-    fn outcome(&self, monitor: &MonitorInfo, height: u32) -> DockOutcome {
+    fn outcome(&self, monitor: &MonitorInfo, edge: Edge, height: u32) -> DockOutcome {
         match self.unsupported {
             Some(reason) => DockOutcome::Unsupported { reason },
             None => DockOutcome::Reserved {
-                rect: dock_rect(monitor, height, None),
+                rect: dock_rect(monitor, edge, height, None),
                 guarantee: ReservationGuarantee::Enforced,
             },
         }
@@ -430,29 +446,33 @@ impl EdgeDock for ScriptedDock {
         &mut self,
         _: RawWindowHandle,
         monitor: &MonitorInfo,
+        edge: Edge,
         strip_height_logical: u32,
     ) -> Result<DockOutcome, DockError> {
         self.record(DockCall::Reserve {
             monitor: monitor.clone(),
+            edge,
             strip_height_logical,
         });
         self.reserved = self.unsupported.is_none();
-        Ok(self.outcome(monitor, strip_height_logical))
+        Ok(self.outcome(monitor, edge, strip_height_logical))
     }
 
     fn update(
         &mut self,
         monitor: &MonitorInfo,
+        edge: Edge,
         strip_height_logical: u32,
     ) -> Result<DockOutcome, DockError> {
         self.record(DockCall::Update {
             monitor: monitor.clone(),
+            edge,
             strip_height_logical,
         });
         if self.unsupported.is_none() && !self.reserved {
             return Err(DockError::NotReserved);
         }
-        Ok(self.outcome(monitor, strip_height_logical))
+        Ok(self.outcome(monitor, edge, strip_height_logical))
     }
 
     fn release(&mut self) -> Result<(), DockError> {
@@ -535,8 +555,11 @@ mod tests {
         let expected = DockOutcome::Unsupported {
             reason: UnsupportedReason::MacOs,
         };
-        assert_eq!(dock.reserve(handle, &monitor(), 24), Ok(expected.clone()));
-        assert_eq!(dock.update(&monitor(), 24), Ok(expected));
+        assert_eq!(
+            dock.reserve(handle, &monitor(), Edge::Bottom, 24),
+            Ok(expected.clone())
+        );
+        assert_eq!(dock.update(&monitor(), Edge::Bottom, 24), Ok(expected));
         assert_eq!(dock.release(), Ok(()));
         assert_eq!(dock.handle_native_message(1, 2, 3), None);
     }
@@ -545,8 +568,11 @@ mod tests {
     fn scripted_dock_records_and_reserves() {
         let mut dock = ScriptedDock::reserving();
         let probe = dock.clone();
-        assert_eq!(dock.update(&monitor(), 24), Err(DockError::NotReserved));
-        let outcome = dock.reserve(xlib(1), &monitor(), 24).unwrap();
+        assert_eq!(
+            dock.update(&monitor(), Edge::Bottom, 24),
+            Err(DockError::NotReserved)
+        );
+        let outcome = dock.reserve(xlib(1), &monitor(), Edge::Bottom, 24).unwrap();
         assert_eq!(
             outcome,
             DockOutcome::Reserved {
@@ -554,7 +580,7 @@ mod tests {
                 guarantee: ReservationGuarantee::Enforced
             }
         );
-        assert!(dock.update(&monitor(), 24).is_ok());
+        assert!(dock.update(&monitor(), Edge::Bottom, 24).is_ok());
         dock.release().unwrap();
         let calls = probe.calls();
         assert_eq!(calls.len(), 4);
@@ -572,13 +598,13 @@ mod tests {
     fn scripted_dock_can_decline() {
         let mut dock = ScriptedDock::unsupported(UnsupportedReason::Wayland);
         assert_eq!(
-            dock.update(&monitor(), 24),
+            dock.update(&monitor(), Edge::Bottom, 24),
             Ok(DockOutcome::Unsupported {
                 reason: UnsupportedReason::Wayland
             })
         );
         assert!(matches!(
-            dock.reserve(xlib(1), &monitor(), 24),
+            dock.reserve(xlib(1), &monitor(), Edge::Bottom, 24),
             Ok(DockOutcome::Unsupported { .. })
         ));
     }

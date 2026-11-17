@@ -3,8 +3,9 @@
 //!
 //! This is the only code that needs a real window, so it is kept to
 //! translation: shell updates → viewport commands, window handle → dock,
-//! window moves → saved floating position. Decisions live in `shell`,
-//! `presentation::repaint` and `ui::app`.
+//! window moves → saved floating position, a docked window that moved,
+//! resized or changed scale → an immediate dock check. Decisions live in
+//! `shell`, `presentation` and `ui::app`.
 //!
 //! It never asks for frames on a timer. The shell thread wakes it when the
 //! strip must move, hide or show; the controller when data changes; the
@@ -14,15 +15,19 @@
 use std::sync::Arc;
 
 use buildrail_platform::dock::{raw_window_handle_of, ReservationGuarantee, WindowRef};
-use buildrail_platform::geometry::STRIP_HEIGHT_LOGICAL;
+use buildrail_platform::geometry::{Edge, STRIP_HEIGHT_LOGICAL};
 use buildrail_platform::geometry::{MonitorInfo as PlatformMonitor, PhysicalPosition};
 use buildrail_profile::Placement;
-use eframe::egui::{self, Pos2, Vec2, ViewportBuilder, ViewportCommand};
+use eframe::egui::{self, Pos2, Rect, Vec2, ViewportBuilder, ViewportCommand};
 use raw_window_handle::RawWindowHandle;
 
 use super::app::BuildRailUi;
 use super::settings::{DeviceInfo, MonitorInfo};
-use crate::shell::{DockController, ShellCommand, ShellMode, ShellUpdate, ShellWorker, FLOAT_SIZE};
+use crate::presentation::StripSide;
+use crate::shell::{
+    describe, docked_edge, DockController, ShellCommand, ShellMode, ShellUpdate, ShellWorker,
+    FLOAT_SIZE,
+};
 
 /// Builds the dock controller once the native window exists (the
 /// fullscreen probe needs its handle; monitor fallbacks need egui's view
@@ -43,8 +48,12 @@ pub fn strip_viewport(placement: &Placement) -> ViewportBuilder {
         .with_taskbar(false)
         .with_active(false)
         .with_inner_size([FLOAT_SIZE.width as f32, STRIP_HEIGHT_LOGICAL as f32])
-        .with_min_inner_size([160.0, STRIP_HEIGHT_LOGICAL as f32]);
-    if matches!(placement, Placement::DockedBottom) {
+        // No minimum height: with a scale override below the display's own
+        // scale the docked strip is fewer physical pixels tall than 24
+        // logical ones, and a minimum would hold the window taller than the
+        // edge it reserved.
+        .with_min_inner_size([160.0, 1.0]);
+    if docked_edge(placement).is_some() {
         // Some X11 window managers only read the type when a window is first
         // mapped; the dock sets it too, this makes it right from the start.
         builder = builder.with_window_type(egui::X11WindowType::Dock);
@@ -55,13 +64,21 @@ pub fn strip_viewport(placement: &Placement) -> ViewportBuilder {
 /// The sentence Settings shows about the current placement.
 pub fn placement_note(mode: &ShellMode) -> Option<String> {
     match mode {
-        ShellMode::Docked { guarantee, .. } => Some(
-            match guarantee {
-                ReservationGuarantee::Enforced => {
+        ShellMode::Docked {
+            guarantee, edge, ..
+        } => Some(
+            match (guarantee, edge) {
+                (ReservationGuarantee::Enforced, Edge::Bottom) => {
                     "Docked above the taskbar. Maximised windows stop above the strip."
                 }
-                ReservationGuarantee::BestEffort => {
+                (ReservationGuarantee::Enforced, Edge::Top) => {
+                    "Docked along the top of the screen. Maximised windows start below the strip."
+                }
+                (ReservationGuarantee::BestEffort, Edge::Bottom) => {
                     "Docked along the bottom edge. Your window manager decides whether maximised windows stop above it."
+                }
+                (ReservationGuarantee::BestEffort, Edge::Top) => {
+                    "Docked along the top edge. Your window manager decides whether maximised windows start below it."
                 }
             }
             .to_owned(),
@@ -95,11 +112,32 @@ pub struct StripWindow {
     monitors: Vec<PlatformMonitor>,
     settings_was_open: bool,
     last_outer: Option<Pos2>,
+    /// The docked window's rect and scale last frame.
+    docked_geometry: Option<(Option<Rect>, Option<f32>)>,
+}
+
+/// How the strip sits, for its pop-ups and edge line.
+pub fn strip_side(mode: &ShellMode, placement: &Placement) -> StripSide {
+    match (mode, docked_edge(placement)) {
+        (
+            ShellMode::Docked {
+                edge: Edge::Top, ..
+            },
+            _,
+        ) => StripSide::Top,
+        (ShellMode::Docked { .. }, _) => StripSide::Bottom,
+        (ShellMode::Floating { .. }, _) => StripSide::Floating,
+        (ShellMode::NotStarted, Some(Edge::Top)) => StripSide::Top,
+        (ShellMode::NotStarted, Some(Edge::Bottom)) => StripSide::Bottom,
+        (ShellMode::NotStarted, None) => StripSide::Floating,
+    }
 }
 
 impl StripWindow {
     /// A window around `ui`; the shell is built on the first frame.
-    pub fn new(ui: BuildRailUi, make_shell: ShellFactory) -> Self {
+    pub fn new(mut ui: BuildRailUi, make_shell: ShellFactory) -> Self {
+        let side = strip_side(&ShellMode::NotStarted, &ui.controller().prefs().placement);
+        ui.set_strip_surroundings(side, Vec::new());
         Self {
             ui,
             shell: None,
@@ -108,6 +146,7 @@ impl StripWindow {
             monitors: Vec::new(),
             settings_was_open: false,
             last_outer: None,
+            docked_geometry: None,
         }
     }
 
@@ -176,6 +215,7 @@ impl StripWindow {
                 }
                 ShellUpdate::Hidden(hidden) => self.ui.set_strip_visible(!hidden),
                 ShellUpdate::Monitors(monitors) => {
+                    tracing::debug!(monitors = %describe(&monitors), "monitors from the shell thread");
                     self.monitors = monitors;
                     changed = true;
                 }
@@ -198,6 +238,8 @@ impl StripWindow {
 
     fn sync_shell_info(&mut self) {
         self.ui.set_movable(self.mode.is_movable());
+        let side = strip_side(&self.mode, &self.ui.controller().prefs().placement);
+        self.ui.set_strip_surroundings(side, self.monitors.clone());
         self.ui.set_device_info(DeviceInfo {
             monitors: monitor_list(&self.monitors),
             placement_note: placement_note(&self.mode),
@@ -217,6 +259,32 @@ impl StripWindow {
         if (ctx.zoom_factor() - zoom).abs() > f32::EPSILON {
             ctx.set_zoom_factor(zoom);
         }
+    }
+
+    /// While docked, anything that moves, resizes or rescales the window
+    /// (the toolkit keeping its logical size on a monitor with another
+    /// scale, start-up sizing) asks the shell thread for a dock check
+    /// straight away, which puts it back on the reserved edge.
+    fn watch_docked_window(&mut self, ctx: &egui::Context) {
+        let Some(shell) = &self.shell else { return };
+        if self.mode.docked_edge().is_none() {
+            self.docked_geometry = None;
+            return;
+        }
+        let geometry = ctx.input(|i| {
+            (
+                i.viewport().outer_rect,
+                i.viewport().native_pixels_per_point,
+            )
+        });
+        if self.docked_geometry.is_some_and(|last| last != geometry) {
+            tracing::debug!(
+                ?geometry,
+                "the docked window moved or changed scale; checking"
+            );
+            shell.check_now();
+        }
+        self.docked_geometry = Some(geometry);
     }
 
     /// Tells the shell where the floating window was dropped.
@@ -244,6 +312,7 @@ impl eframe::App for StripWindow {
         self.start_shell(ctx, frame);
         self.take_updates(ctx);
         self.track_moves(ctx);
+        self.watch_docked_window(ctx);
         // Opening Settings: fetch the display list once.
         let open = self.ui.is_settings_open();
         if open && !self.settings_was_open {
@@ -293,21 +362,64 @@ mod tests {
 
     #[test]
     fn placement_notes_and_monitor_names() {
-        let docked = |guarantee| ShellMode::Docked {
+        let docked = |guarantee, edge| ShellMode::Docked {
             rect: PhysicalRect::new(0, 0, 10, 10),
+            edge,
             guarantee,
         };
-        assert!(placement_note(&docked(ReservationGuarantee::Enforced))
-            .unwrap()
-            .contains("taskbar"));
-        assert!(placement_note(&docked(ReservationGuarantee::BestEffort))
-            .unwrap()
-            .contains("window manager"));
+        assert!(
+            placement_note(&docked(ReservationGuarantee::Enforced, Edge::Bottom))
+                .unwrap()
+                .contains("taskbar")
+        );
+        assert!(
+            placement_note(&docked(ReservationGuarantee::Enforced, Edge::Top))
+                .unwrap()
+                .contains("top of the screen")
+        );
+        assert!(
+            placement_note(&docked(ReservationGuarantee::BestEffort, Edge::Bottom))
+                .unwrap()
+                .contains("window manager")
+        );
+        assert!(
+            placement_note(&docked(ReservationGuarantee::BestEffort, Edge::Top))
+                .unwrap()
+                .contains("top edge")
+        );
+        let top = docked(ReservationGuarantee::Enforced, Edge::Top);
+        assert_eq!(strip_side(&top, &Placement::DockedBottom), StripSide::Top);
+        assert_eq!(
+            strip_side(
+                &docked(ReservationGuarantee::Enforced, Edge::Bottom),
+                &Placement::DockedTop
+            ),
+            StripSide::Bottom
+        );
+        assert_eq!(
+            strip_side(&ShellMode::NotStarted, &Placement::DockedTop),
+            StripSide::Top
+        );
+        assert_eq!(
+            strip_side(&ShellMode::NotStarted, &Placement::DockedBottom),
+            StripSide::Bottom
+        );
+        assert_eq!(
+            strip_side(
+                &ShellMode::NotStarted,
+                &Placement::Floating { position: None }
+            ),
+            StripSide::Floating
+        );
         let floating = ShellMode::Floating {
             rect: PhysicalRect::new(0, 0, 10, 10),
             reason: FloatReason::Unsupported(UnsupportedReason::Wayland),
         };
         assert!(placement_note(&floating).unwrap().contains("Wayland"));
+        assert_eq!(
+            strip_side(&floating, &Placement::DockedBottom),
+            StripSide::Floating
+        );
         assert_eq!(placement_note(&ShellMode::NotStarted), None);
 
         let monitors = monitor_list(&[PlatformMonitor {
@@ -323,5 +435,10 @@ mod tests {
 
         let builder = strip_viewport(&Placement::DockedBottom);
         assert!(builder.icon.is_some());
+        assert_eq!(builder.min_inner_size, Some(Vec2::new(160.0, 1.0)));
+        assert!(strip_viewport(&Placement::DockedTop).window_type.is_some());
+        assert!(strip_viewport(&Placement::Floating { position: None })
+            .window_type
+            .is_none());
     }
 }

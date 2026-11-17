@@ -108,6 +108,8 @@ pub enum Placement {
     /// Docked along the bottom edge of the work area.
     #[default]
     DockedBottom,
+    /// Docked along the top edge of the work area.
+    DockedTop,
     /// A free-floating window.
     Floating {
         /// Last position, in logical pixels relative to the monitor's
@@ -280,6 +282,27 @@ mod tests {
             assert!(text.contains("version = 1"), "{text}");
             assert_eq!(DevicePrefs::decode(&text).unwrap(), prefs, "{text}");
         }
+    }
+
+    #[test]
+    fn placement_modes_round_trip_and_old_files_still_read() {
+        for placement in [
+            Placement::DockedBottom,
+            Placement::DockedTop,
+            Placement::Floating { position: None },
+        ] {
+            let prefs = DevicePrefs {
+                placement,
+                ..DevicePrefs::default()
+            };
+            let text = prefs.encode().unwrap();
+            assert_eq!(DevicePrefs::decode(&text).unwrap().placement, placement);
+        }
+        let top = DevicePrefs::decode("version = 1\n[placement]\nmode = \"docked-top\"\n").unwrap();
+        assert_eq!(top.placement, Placement::DockedTop);
+        let bottom =
+            DevicePrefs::decode("version = 1\n[placement]\nmode = \"docked-bottom\"\n").unwrap();
+        assert_eq!(bottom.placement, Placement::DockedBottom);
     }
 
     #[test]

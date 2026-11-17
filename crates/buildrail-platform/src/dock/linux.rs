@@ -5,7 +5,7 @@ use raw_window_handle::RawWindowHandle;
 
 use super::session::LinuxSession;
 use super::{x11_window_id, DockError, DockOutcome, EdgeDock, UnsupportedReason};
-use crate::geometry::MonitorInfo;
+use crate::geometry::{Edge, MonitorInfo};
 use crate::x11::{X11Connection, X11Dock};
 
 /// The dock [`super::platform_dock`] returns on Linux and the BSDs.
@@ -40,6 +40,7 @@ impl EdgeDock for LinuxDock {
         &mut self,
         window: RawWindowHandle,
         monitor: &MonitorInfo,
+        edge: Edge,
         strip_height_logical: u32,
     ) -> Result<DockOutcome, DockError> {
         if let RawWindowHandle::Wayland(_) = window {
@@ -58,19 +59,20 @@ impl EdgeDock for LinuxDock {
             Some(dock) => dock,
             None => self.x11.insert(X11Dock::new(X11Connection::connect(None)?)),
         };
-        dock.reserve(window, monitor, strip_height_logical)
+        dock.reserve(window, monitor, edge, strip_height_logical)
     }
 
     fn update(
         &mut self,
         monitor: &MonitorInfo,
+        edge: Edge,
         strip_height_logical: u32,
     ) -> Result<DockOutcome, DockError> {
         if let Some(reason) = self.declined {
             return Ok(DockOutcome::Unsupported { reason });
         }
         match &mut self.x11 {
-            Some(dock) => dock.update(monitor, strip_height_logical),
+            Some(dock) => dock.update(monitor, edge, strip_height_logical),
             None => Err(DockError::NotReserved),
         }
     }
@@ -105,15 +107,18 @@ mod tests {
         let handle =
             RawWindowHandle::Wayland(WaylandWindowHandle::new(NonNull::from(&mut dummy).cast()));
         let mut dock = LinuxDock::new(LinuxSession::Wayland { xwayland: false });
-        assert_eq!(dock.update(&monitor(), 24), Err(DockError::NotReserved));
-        let outcome = dock.reserve(handle, &monitor(), 24).unwrap();
+        assert_eq!(
+            dock.update(&monitor(), Edge::Bottom, 24),
+            Err(DockError::NotReserved)
+        );
+        let outcome = dock.reserve(handle, &monitor(), Edge::Top, 24).unwrap();
         assert_eq!(
             outcome,
             DockOutcome::Unsupported {
                 reason: UnsupportedReason::Wayland
             }
         );
-        assert_eq!(dock.update(&monitor(), 24), Ok(outcome));
+        assert_eq!(dock.update(&monitor(), Edge::Bottom, 24), Ok(outcome));
         assert!(dock.x11.is_none());
         assert_eq!(dock.release(), Ok(()));
     }
@@ -125,7 +130,7 @@ mod tests {
             RawWindowHandle::AppKit(AppKitWindowHandle::new(NonNull::from(&mut dummy).cast()));
         let mut dock = LinuxDock::new(LinuxSession::X11);
         assert_eq!(
-            dock.reserve(handle, &monitor(), 24),
+            dock.reserve(handle, &monitor(), Edge::Top, 24),
             Ok(DockOutcome::Unsupported {
                 reason: UnsupportedReason::UnsupportedWindowHandle
             })

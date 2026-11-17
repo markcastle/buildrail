@@ -1,6 +1,6 @@
 # BuildRail
 
-BuildRail is a thin strip along the bottom of your screen that tells you, at a glance, whether the builds you care about are passing. Pin a GitHub Actions workflow or a Cloudflare Worker, and its entry stays in the same place all day, so you learn where to look.
+BuildRail is a thin strip along the bottom (or top) of your screen that tells you, at a glance, whether the builds you care about are passing. Pin a GitHub Actions workflow or a Cloudflare Worker, and its entry stays in the same place all day, so you learn where to look.
 
 ![The BuildRail strip in demo mode](docs/images/strip-dark.png)
 
@@ -104,16 +104,16 @@ Monitor, scale, theme, placement, animation, start-at-login and automatic update
 
 | System | Placement | State of testing |
 |---|---|---|
-| Windows | Registers as an AppBar, so it sits above the taskbar and maximised windows stop short of it | Type-checked only. Never run. |
-| Linux, X11 | Sets dock type and struts, so the window manager reserves the edge | Docking tested against a real X server (Xvfb), not against a real window manager |
+| Windows | Registers as an AppBar at the bottom or top, so it sits against the taskbar or screen edge and maximised windows stay clear of it | Docking tested against the real Explorer on CI's Windows runner (one display at 100 %), plus a demo smoke run with a screenshot. Two displays at different scales only by hand. |
+| Linux, X11 | Sets dock type and struts for the bottom or top edge, so the window manager reserves it | Docking tested against a real X server (Xvfb), not against a real window manager |
 | Linux, Wayland | Compact movable window. A winit window cannot become a layer-shell surface yet. | Not run |
 | macOS | Compact movable window. macOS has no public way to reserve a screen edge. | Type-checked only. Never run. |
 
 The strip hides while a fullscreen app is on its monitor (Windows and X11), never takes keyboard focus on its own, and follows the system light or dark theme unless you override it. Only one strip runs at a time: starting BuildRail again leaves the running copy as it is. It draws with OpenGL on every system, and an idle strip draws nothing at all until something on it changes.
 
-Updating replaces the program file in place and starts the new copy, after giving back the screen edge and the one-strip lock. It is tested with fakes and against a local web server, but has not yet replaced a real installed copy on any system: that is step 9 of the checklist below.
+Updating replaces the program file in place and starts the new copy, after giving back the screen edge and the one-strip lock. It is tested with fakes and against a local web server, but has not yet replaced a real installed copy on any system: that is step 10 of the checklist below.
 
-> **Before you rely on it:** the real window has not been opened on any operating system yet. Everything above the window layer is tested, and the strip is rendered and checked headlessly, but the first job on each system is to run `--demo` and then the acceptance scenario below.
+> **Before you rely on it:** the real window has so far only been run by hand on Windows. Everything above the window layer is tested, and the strip is rendered and checked headlessly, but the first job on each system is to run `--demo` and then the acceptance scenario below.
 
 ## Finding your way around the code
 
@@ -191,14 +191,15 @@ Do not make tags or set the version by hand: a pushed tag builds nothing. Everyt
 These are the checks that cannot be automated here and need a person at a real desktop.
 
 1. Run `--demo`. Confirm the strip is 24 pixels tall at your display scale, sits where the table above says, and does not take focus from the app you were typing in.
-2. Maximise a window and confirm it stops above the strip (Windows and X11).
-3. Open a fullscreen app and confirm the strip gets out of the way.
-4. Pin a GitHub workflow and a Worker, trigger builds, and watch queued, building and the final state appear. Open each run from the strip.
-5. Re-run a build and confirm the entries do not change order.
-6. Disconnect the network and confirm the entries show their age and an offline note. Sleep and wake the machine and confirm they recover.
-7. Export the profile, import it on a second operating system, and confirm the same targets in the same order after you supply local tokens.
-8. Import a deliberately broken file and confirm your configuration is untouched.
-9. Install the previous release with the one-line installer, publish a new one, and confirm the Update mark appears within the hour (or at once with Check for updates), that Install now restarts into the new version with the strip docked where it was, and that a second start shows no leftover files beside the program.
+2. Maximise a window and confirm it stops above the strip (Windows and X11). Switch Placement to Top and confirm the strip moves to the top edge and maximised windows start below it.
+3. With two displays at different scales, choose the other display: the strip sits flush against that display's taskbar (or top edge) with no gap, and its details open on that display. Quit and start again, and confirm it is still flush and the first display's work area is whole.
+4. Open a fullscreen app and confirm the strip gets out of the way.
+5. Pin a GitHub workflow and a Worker, trigger builds, and watch queued, building and the final state appear. Open each run from the strip.
+6. Re-run a build and confirm the entries do not change order.
+7. Disconnect the network and confirm the entries show their age and an offline note. Sleep and wake the machine and confirm they recover.
+8. Export the profile, import it on a second operating system, and confirm the same targets in the same order after you supply local tokens.
+9. Import a deliberately broken file and confirm your configuration is untouched.
+10. Install the previous release with the one-line installer, publish a new one, and confirm the Update mark appears within the hour (or at once with Check for updates), that Install now restarts into the new version with the strip docked where it was, and that a second start shows no leftover files beside the program.
 
 ## Not in this release
 

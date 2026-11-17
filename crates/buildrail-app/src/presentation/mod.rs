@@ -10,16 +10,23 @@
 //!   ([`RepaintPlanner`]): only when what it shows changes.
 //! * [`update`] – what the strip and About say about updates, and when an
 //!   automatic install may start.
+//! * [`popup`] – where the strip's pop-up cards go, in physical pixels on
+//!   the strip's own monitor, and when a pop-up window is in place to be
+//!   shown.
 //!
 //! Nothing here depends on egui; the `ui` module draws these models.
 
 pub mod overflow;
+pub mod popup;
 pub mod repaint;
 pub mod strip;
 pub mod text;
 pub mod update;
 
 pub use overflow::{fit, OverflowGroup, OverflowLayout};
+pub use popup::{
+    monitor_under, popup_rect, PopupAlign, PopupPlacement, PopupRequest, PopupStep, StripSide,
+};
 pub use repaint::{snapshots_differ_visibly, Motion, RepaintPlanner};
 pub use strip::{provider_mark, IconKind, StripEntry, StripModel};
 pub use text::{age_long, age_short, short_commit};

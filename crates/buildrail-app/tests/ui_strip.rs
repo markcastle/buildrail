@@ -510,3 +510,47 @@ fn building_glyph_is_still_unless_animation_is_on_and_the_strip_is_visible() {
     assert!(h.state().next_repaint().unwrap() >= Duration::from_secs(59));
     assert_eq!(h.render().unwrap(), still, "at rest, the glyph is the same");
 }
+
+/// The strip's 1 px line faces the desktop: along its top edge when it
+/// sits at the bottom of the screen (or floats), along its bottom edge when
+/// it is docked at the top.
+#[test]
+fn the_edge_line_faces_the_desktop() {
+    use buildrail_app::presentation::StripSide;
+    use buildrail_app::ui::Tokens;
+
+    let tokens = Tokens::for_theme(buildrail_profile::Theme::Dark, None);
+    let distance = |p: &image::Rgba<u8>, c: eframe::egui::Color32| {
+        (i32::from(p[0]) - i32::from(c.r())).abs()
+            + (i32::from(p[1]) - i32::from(c.g())).abs()
+            + (i32::from(p[2]) - i32::from(c.b())).abs()
+    };
+    for (side, line_row, ground_row) in [
+        (StripSide::Bottom, 0, 23),
+        (StripSide::Floating, 0, 23),
+        (StripSide::Top, 23, 0),
+    ] {
+        let f = Fixture::new();
+        let mut app = demo_ui(&f, buildrail_profile::Theme::Dark);
+        app.set_strip_surroundings(side, Vec::new());
+        assert_eq!(app.strip_view().side(), side);
+        let mut h = Harness::builder()
+            .with_size([400.0, 24.0])
+            .with_pixels_per_point(1.0)
+            .renderer(CpuRenderer::default())
+            .build_ui_state(root_ui, app);
+        for _ in 0..4 {
+            h.step();
+        }
+        let image = h.render().unwrap();
+        // Right of the caption rule and the first entry's start: plain ground.
+        let x = 395;
+        let line = image.get_pixel(x, line_row);
+        let ground = image.get_pixel(x, ground_row);
+        assert!(
+            distance(line, tokens.line) < distance(ground, tokens.line),
+            "{side:?}: row {line_row} {line:?} should be the line, row {ground_row} {ground:?} the ground"
+        );
+        assert!(distance(ground, tokens.bg) <= 6, "{side:?}: {ground:?}");
+    }
+}

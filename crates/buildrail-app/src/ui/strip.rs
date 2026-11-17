@@ -1,7 +1,8 @@
 //! The 24 px strip: `Builds │ ✕ Keevoro · Failed  ✓ Site · Deployed  +2 · 1 failed   + ⚙`.
 //!
 //! Drawn in the Task Rail manner: a flat `bg` ground with a 1 px `line` on
-//! its top edge, a quiet "Builds" caption, then one entry per pinned build
+//! the edge facing the desktop (the top edge, or the bottom edge when the
+//! strip is docked at the top of the screen), a quiet "Builds" caption, then one entry per pinned build
 //! (provider mark, status glyph, label at 500 in `text`, `·`, the status
 //! word in its state colour, and a muted note when the data is not
 //! current). The pointer lights an entry with a `bg-hover` pill (radius
@@ -26,11 +27,17 @@
 //!
 //! Hover or keyboard focus reveals an entry's details. The strip window is
 //! only 24 px tall, so details (and the overflow list) open in their own
-//! small, non-activating viewport above the strip; in single-window test
-//! harnesses egui embeds them as windows instead. A popup viewport exists
-//! only while it is shown (egui closes an immediate viewport the first
-//! frame it is not drawn), and the strip never asks for frames of its own:
-//! when to paint next is decided by
+//! small, non-activating viewport, away from the screen edge the strip is
+//! docked to; in single-window test harnesses egui embeds them as windows
+//! instead. Where a pop-up goes is worked out in physical pixels from the
+//! strip window's real rect and the monitor it is on
+//! ([`popup_rect`](crate::presentation::popup_rect)); the pop-up window is
+//! created hidden, moved until it is really there (its first move may land
+//! it on a monitor with another scale), and only then shown
+//! ([`PopupPlacement`]). A popup viewport exists only while it is shown
+//! (egui closes an immediate viewport the first frame it is not drawn), and
+//! the strip never asks for frames of its own beyond the one or two that
+//! place a pop-up: when to paint next is decided by
 //! [`RepaintPlanner`](crate::presentation::RepaintPlanner).
 
 use std::sync::Arc;
@@ -40,10 +47,15 @@ use eframe::egui::{
     StrokeKind, Ui, Vec2, ViewportBuilder, ViewportId, WidgetInfo, WidgetText,
 };
 
+use buildrail_platform::geometry::{MonitorInfo, PhysicalRect};
+
 use super::glyphs::{paint_gear, paint_icon, paint_plus, paint_provider_mark};
 use super::theme::{radius, type_style, Tokens, TypeStyle};
 use super::widgets::{self, button, icon_button_at, ButtonKind};
-use crate::presentation::{fit, provider_mark, OverflowGroup, StripEntry, StripModel, UpdateChip};
+use crate::presentation::{
+    fit, popup_rect, provider_mark, OverflowGroup, PopupAlign, PopupPlacement, PopupRequest,
+    PopupStep, StripEntry, StripModel, StripSide, UpdateChip,
+};
 
 /// Height of the strip in logical pixels (points).
 pub const STRIP_HEIGHT: f32 = 24.0;
@@ -102,6 +114,60 @@ pub struct StripView {
     overflow_open: bool,
     update: Option<UpdateChip>,
     update_card: UpdateCardState,
+    surroundings: Surroundings,
+    popups: Popups,
+}
+
+/// Where the strip sits, for its pop-ups and its edge line.
+#[derive(Debug, Clone, Default, PartialEq)]
+struct Surroundings {
+    side: StripSide,
+    monitors: Vec<MonitorInfo>,
+}
+
+/// One pop-up window's placement, and whether it was drawn this frame.
+#[derive(Debug, Default)]
+struct PopupSlot {
+    placement: PopupPlacement,
+    drawn: bool,
+}
+
+impl PopupSlot {
+    /// Marks the slot drawn this frame and returns its placement.
+    fn use_now(&mut self) -> &mut PopupPlacement {
+        self.drawn = true;
+        &mut self.placement
+    }
+}
+
+/// The three pop-up windows.
+#[derive(Debug, Default)]
+struct Popups {
+    details: PopupSlot,
+    update: PopupSlot,
+    overflow: PopupSlot,
+}
+
+impl Popups {
+    fn slots(&mut self) -> [&mut PopupSlot; 3] {
+        [&mut self.details, &mut self.update, &mut self.overflow]
+    }
+
+    fn begin_frame(&mut self) {
+        for slot in self.slots() {
+            slot.drawn = false;
+        }
+    }
+
+    /// A pop-up not drawn this frame has closed: the next one starts
+    /// hidden and unplaced.
+    fn end_frame(&mut self) {
+        for slot in self.slots() {
+            if !slot.drawn {
+                slot.placement = PopupPlacement::new();
+            }
+        }
+    }
 }
 
 /// Whether the update card is open and why.
@@ -159,10 +225,36 @@ impl StripView {
         self.update_card.open
     }
 
+    /// Where the strip sits (docked top, docked bottom or floating) and the
+    /// connected monitors: pop-ups open away from the screen edge, on the
+    /// strip's own monitor, and the edge line faces the desktop.
+    pub fn set_surroundings(&mut self, side: StripSide, monitors: Vec<MonitorInfo>) {
+        self.surroundings = Surroundings { side, monitors };
+    }
+
+    /// How the strip sits, as last set.
+    pub fn side(&self) -> StripSide {
+        self.surroundings.side
+    }
+
     /// Draws the strip in the top `STRIP_HEIGHT` points of `ui` and returns
     /// what the user asked for. `movable` makes the caption a drag handle;
     /// `phase` is the in-progress glyph's animation step (`0` = at rest).
     pub fn show(
+        &mut self,
+        ui: &mut Ui,
+        model: &StripModel,
+        tokens: &Tokens,
+        movable: bool,
+        phase: u32,
+    ) -> Vec<StripAction> {
+        self.popups.begin_frame();
+        let actions = self.show_strip(ui, model, tokens, movable, phase);
+        self.popups.end_frame();
+        actions
+    }
+
+    fn show_strip(
         &mut self,
         ui: &mut Ui,
         model: &StripModel,
@@ -175,9 +267,14 @@ impl StripView {
         let strip = Rect::from_min_size(full.min, Vec2::new(full.width(), STRIP_HEIGHT));
         let painter = ui.painter_at(strip);
         painter.rect_filled(strip, 0.0, tokens.rail_gradient);
+        // The line faces the desktop: under a strip docked at the top.
+        let line_y = match self.surroundings.side {
+            StripSide::Top => strip.max.y - 0.5,
+            StripSide::Bottom | StripSide::Floating => strip.min.y + 0.5,
+        };
         painter.hline(
             strip.min.x..=strip.max.x,
-            strip.min.y + 0.5,
+            line_y,
             Stroke::new(1.0, tokens.line),
         );
         let y = strip.center().y;
@@ -329,8 +426,12 @@ impl StripView {
             }
             if self.overflow_open {
                 let hidden = &model.entries[layout.visible..];
+                let host = PopupHost {
+                    surroundings: &self.surroundings,
+                    slot: &mut self.popups.overflow,
+                };
                 if let Some(action) =
-                    overflow_list(ui.ctx(), hidden, tokens, &mut self.overflow_open)
+                    overflow_list(ui.ctx(), hidden, tokens, &mut self.overflow_open, host)
                 {
                     actions.push(action);
                 }
@@ -401,7 +502,11 @@ impl StripView {
         }
         let mut action = response.clicked().then_some(StripAction::OpenUpdates);
         if card.open {
-            if let Some(chosen) = update_popup(ui.ctx(), chip, rect, tokens, card) {
+            let host = PopupHost {
+                surroundings: &self.surroundings,
+                slot: &mut self.popups.update,
+            };
+            if let Some(chosen) = update_popup(ui.ctx(), chip, rect, tokens, card, host) {
                 action = Some(chosen);
             }
         } else {
@@ -511,7 +616,11 @@ impl StripView {
         }
 
         if response.hovered() || response.has_focus() {
-            details(ui.ctx(), entry, rect, tokens);
+            let host = PopupHost {
+                surroundings: &self.surroundings,
+                slot: &mut self.popups.details,
+            };
+            details(ui.ctx(), entry, rect, tokens, host);
         }
         if response.clicked() {
             return action_for(entry);
@@ -610,20 +719,90 @@ fn pill(painter: &egui::Painter, response: &egui::Response, rect: Rect, tokens: 
     lit
 }
 
-/// Where a popup viewport of `size` should go: above the strip, or below
-/// it when the strip is at the top of the screen.
-fn popup_position(ctx: &egui::Context, anchor: Rect, size: Vec2) -> Pos2 {
-    let (outer, monitor) = ctx.input(|i| (i.viewport().outer_rect, i.viewport().monitor_size));
-    let origin = outer.map_or(Pos2::ZERO, |r| r.min);
-    let x = origin.x + anchor.min.x - CARD_MARGIN;
-    let above = origin.y - size.y;
-    let y = if above < 0.0 {
-        origin.y + STRIP_HEIGHT
-    } else {
-        above
-    };
-    let x = monitor.map_or(x, |m| x.min(m.x - size.x).max(0.0));
-    Pos2::new(x, y)
+/// What a pop-up needs from the strip: where it sits, and the pop-up
+/// window's placement state.
+struct PopupHost<'a> {
+    surroundings: &'a Surroundings,
+    slot: &'a mut PopupSlot,
+}
+
+/// A pop-up window's wanted rect, in physical pixels, and its first guess
+/// in points for egui (exact when the pop-up is created on the strip's
+/// monitor; [`place_popup`] corrects it otherwise).
+struct PopupTarget {
+    rect: PhysicalRect,
+    guess: Pos2,
+}
+
+fn to_physical(value: f32) -> i32 {
+    // Saturating float-to-int conversion is the intent.
+    value.round() as i32
+}
+
+/// Where a pop-up of `size` points goes, with its `align` edge at
+/// `anchor_x` points from the strip window's left edge. Worked out in
+/// physical pixels from the strip window's real rect and the monitor it is
+/// on, opening away from the screen edge the strip is docked to.
+fn popup_target(
+    ctx: &egui::Context,
+    surroundings: &Surroundings,
+    anchor_x: f32,
+    align: PopupAlign,
+    size: Vec2,
+) -> PopupTarget {
+    let ppp = ctx.pixels_per_point();
+    let (outer, inner) = ctx.input(|i| (i.viewport().outer_rect, i.viewport().inner_rect));
+    let window = outer.or(inner).unwrap_or(Rect::from_min_size(
+        Pos2::ZERO,
+        Vec2::new(ctx.content_rect().width(), STRIP_HEIGHT),
+    ));
+    let strip = PhysicalRect::new(
+        to_physical(window.min.x * ppp),
+        to_physical(window.min.y * ppp),
+        (window.width() * ppp).round().max(0.0) as u32,
+        (window.height() * ppp).round().max(0.0) as u32,
+    );
+    let rect = popup_rect(&PopupRequest {
+        strip,
+        anchor_x: strip.x + to_physical(anchor_x * ppp),
+        align,
+        width: (size.x * ppp).round().max(1.0) as u32,
+        height: (size.y * ppp).round().max(1.0) as u32,
+        side: surroundings.side,
+        monitors: &surroundings.monitors,
+    });
+    PopupTarget {
+        rect,
+        guess: Pos2::new(rect.x as f32 / ppp, rect.y as f32 / ppp),
+    }
+}
+
+/// Inside a pop-up viewport: moves it until it is really at `wanted`
+/// (converting with *this* viewport's own pixels-per-point, so the
+/// physical position is exact whatever monitor it was created on), then
+/// shows it.
+fn place_popup(ctx: &egui::Context, placement: &mut PopupPlacement, wanted: &PhysicalRect) {
+    let ppp = ctx.pixels_per_point();
+    let actual = ctx.input(|i| i.viewport().outer_rect).map(|r| {
+        PhysicalRect::new(
+            to_physical(r.min.x * ppp),
+            to_physical(r.min.y * ppp),
+            (r.width() * ppp).round().max(0.0) as u32,
+            (r.height() * ppp).round().max(0.0) as u32,
+        )
+    });
+    match placement.step(actual, wanted) {
+        PopupStep::Move => {
+            ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(Pos2::new(
+                wanted.x as f32 / ppp,
+                wanted.y as f32 / ppp,
+            )));
+            // One more frame to see where it landed.
+            ctx.request_repaint();
+        }
+        PopupStep::Show => ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true)),
+        PopupStep::Stay => {}
+    }
 }
 
 fn popup_builder(title: &str, position: Pos2, size: Vec2) -> ViewportBuilder {
@@ -635,6 +814,8 @@ fn popup_builder(title: &str, position: Pos2, size: Vec2) -> ViewportBuilder {
         .with_active(false)
         .with_always_on_top()
         .with_transparent(true)
+        // Shown by `place_popup` once it is where it belongs.
+        .with_visible(false)
         .with_position(position)
         .with_inner_size(size)
 }
@@ -728,7 +909,13 @@ fn detail_size(ctx: &egui::Context, entry: &StripEntry) -> Vec2 {
 }
 
 /// The hover / focus detail popup for one entry.
-fn details(ctx: &egui::Context, entry: &StripEntry, anchor: Rect, tokens: &Tokens) {
+fn details(
+    ctx: &egui::Context,
+    entry: &StripEntry,
+    anchor: Rect,
+    tokens: &Tokens,
+    host: PopupHost<'_>,
+) {
     if ctx.embed_viewports() {
         // One window only (a test harness): float the card under the strip.
         let at = pos2(anchor.min.x - CARD_MARGIN, anchor.max.y);
@@ -741,14 +928,24 @@ fn details(ctx: &egui::Context, entry: &StripEntry, anchor: Rect, tokens: &Token
         return;
     }
     let size = detail_size(ctx, entry);
-    let position = popup_position(ctx, anchor, size);
-    let builder = popup_builder(&format!("{} details", entry.label), position, size)
+    let target = popup_target(
+        ctx,
+        host.surroundings,
+        anchor.min.x - CARD_MARGIN,
+        PopupAlign::Start,
+        size,
+    );
+    let builder = popup_builder(&format!("{} details", entry.label), target.guess, size)
         .with_mouse_passthrough(true);
     let tokens = *tokens;
+    let placement = host.slot.use_now();
     ctx.show_viewport_immediate(
         ViewportId::from_hash_of("buildrail-details"),
         builder,
-        |ui, _| detail_card(ui, entry, &tokens),
+        |ui, _| {
+            place_popup(ui.ctx(), placement, &target.rect);
+            detail_card(ui, entry, &tokens);
+        },
     );
 }
 
@@ -815,6 +1012,7 @@ fn update_popup(
     anchor: Rect,
     tokens: &Tokens,
     card: &mut UpdateCardState,
+    host: PopupHost<'_>,
 ) -> Option<StripAction> {
     fn track(over: bool, escape: bool, card: &mut UpdateCardState) {
         if (card.had_pointer && !over) || escape {
@@ -842,14 +1040,21 @@ fn update_popup(
     }
     let size = update_card_size(ctx, chip);
     // Right-aligned with the chip: it sits at the strip's right end.
-    let aligned = Rect::from_min_size(pos2(anchor.max.x - CARD_WIDTH, anchor.min.y), anchor.size());
-    let position = popup_position(ctx, aligned, size);
-    let builder = popup_builder("BuildRail update", position, size);
+    let target = popup_target(
+        ctx,
+        host.surroundings,
+        anchor.max.x + CARD_MARGIN,
+        PopupAlign::End,
+        size,
+    );
+    let builder = popup_builder("BuildRail update", target.guess, size);
     let tokens = *tokens;
+    let placement = host.slot.use_now();
     ctx.show_viewport_immediate(
         ViewportId::from_hash_of("buildrail-update-card"),
         builder,
         |ui, _| {
+            place_popup(ui.ctx(), placement, &target.rect);
             let (over, escape) = ui.input(|i| {
                 (
                     i.pointer.hover_pos().is_some(),
@@ -951,6 +1156,7 @@ fn overflow_list(
     hidden: &[StripEntry],
     tokens: &Tokens,
     open: &mut bool,
+    host: PopupHost<'_>,
 ) -> Option<StripAction> {
     if ctx.embed_viewports() {
         let width = ctx.content_rect().width();
@@ -977,19 +1183,23 @@ fn overflow_list(
         CARD_WIDTH + 2.0 * CARD_MARGIN,
         12.0 + 22.0 + 30.0 * hidden.len() as f32 + 2.0 * CARD_MARGIN + 4.0,
     );
-    let anchor = ctx
-        .input(|i| i.viewport().inner_rect)
-        .map_or(Rect::ZERO, |r| {
-            Rect::from_min_size(Pos2::new(r.width() - size.x, 0.0), Vec2::ZERO)
-        });
-    let position = popup_position(ctx, anchor, size);
-    let builder = popup_builder("More builds", position, size);
+    // At the strip's right end, as the overflow button is.
+    let target = popup_target(
+        ctx,
+        host.surroundings,
+        ctx.content_rect().width(),
+        PopupAlign::End,
+        size,
+    );
+    let builder = popup_builder("More builds", target.guess, size);
     let tokens = *tokens;
     let mut action = None;
+    let placement = host.slot.use_now();
     ctx.show_viewport_immediate(
         ViewportId::from_hash_of("buildrail-overflow"),
         builder,
         |ui, _| {
+            place_popup(ui.ctx(), placement, &target.rect);
             if ui.input(|i| i.viewport().close_requested() || i.key_pressed(egui::Key::Escape)) {
                 *open = false;
             }

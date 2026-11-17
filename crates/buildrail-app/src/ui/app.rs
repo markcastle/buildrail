@@ -188,6 +188,16 @@ impl BuildRailUi {
         self.movable = movable;
     }
 
+    /// How the strip sits and the connected monitors (see
+    /// [`StripView::set_surroundings`]).
+    pub fn set_strip_surroundings(
+        &mut self,
+        side: crate::presentation::StripSide,
+        monitors: Vec<buildrail_platform::geometry::MonitorInfo>,
+    ) {
+        self.strip.set_surroundings(side, monitors);
+    }
+
     /// Allows or forbids motion whatever the preference says (tests and
     /// screenshots forbid it so frames settle).
     pub fn set_animate(&mut self, animate: bool) {

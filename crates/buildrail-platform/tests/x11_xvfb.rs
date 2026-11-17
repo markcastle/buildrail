@@ -11,7 +11,7 @@ use std::sync::Arc;
 use buildrail_platform::dock::session::LinuxSession;
 use buildrail_platform::dock::{DockError, DockOutcome, EdgeDock, LinuxDock, ReservationGuarantee};
 use buildrail_platform::fullscreen::{FullscreenProbe, FullscreenState};
-use buildrail_platform::geometry::{dock_rect, MonitorId, MonitorInfo, PhysicalRect};
+use buildrail_platform::geometry::{dock_rect, Edge, MonitorId, MonitorInfo, PhysicalRect};
 use buildrail_platform::monitors::MonitorSource;
 use buildrail_platform::x11::{X11Connection, X11Dock, X11FullscreenProbe, X11Monitors};
 use raw_window_handle::{RawWindowHandle, XlibWindowHandle};
@@ -136,7 +136,9 @@ fn reserving_sets_dock_type_struts_state_and_geometry() {
     let monitor = h.monitor(1.0);
     let mut dock = X11Dock::new(connection());
 
-    let outcome = dock.reserve(handle(window), &monitor, 24).unwrap();
+    let outcome = dock
+        .reserve(handle(window), &monitor, Edge::Bottom, 24)
+        .unwrap();
     let rect = PhysicalRect::new(0, h.height as i32 - 24, h.width, 24);
     assert_eq!(
         outcome,
@@ -164,7 +166,7 @@ fn reserving_sets_dock_type_struts_state_and_geometry() {
     assert_eq!(h.geometry(window), rect);
 
     // A scale change (150 %) re-applies with a 36 px strut.
-    let outcome = dock.update(&h.monitor(1.5), 24).unwrap();
+    let outcome = dock.update(&h.monitor(1.5), Edge::Bottom, 24).unwrap();
     assert!(matches!(outcome, DockOutcome::Reserved { rect, .. } if rect.height == 36));
     assert_eq!(h.prop(window, "_NET_WM_STRUT"), vec![0, 0, 0, 36]);
     assert_eq!(h.geometry(window).height, 36);
@@ -172,8 +174,64 @@ fn reserving_sets_dock_type_struts_state_and_geometry() {
     dock.release().unwrap();
     assert!(h.prop(window, "_NET_WM_STRUT_PARTIAL").is_empty());
     assert!(h.prop(window, "_NET_WM_STRUT").is_empty());
-    assert_eq!(dock.update(&monitor, 24), Err(DockError::NotReserved));
+    assert_eq!(
+        dock.update(&monitor, Edge::Bottom, 24),
+        Err(DockError::NotReserved)
+    );
     dock.release().unwrap();
+}
+
+#[test]
+fn reserving_the_top_edge_sets_a_top_strut() {
+    let Some(h) = harness() else { return };
+    let window = h.window(false);
+    let mut dock = X11Dock::new(connection());
+
+    let outcome = dock
+        .reserve(handle(window), &h.monitor(1.0), Edge::Top, 24)
+        .unwrap();
+    let rect = PhysicalRect::new(0, 0, h.width, 24);
+    assert_eq!(
+        outcome,
+        DockOutcome::Reserved {
+            rect,
+            guarantee: ReservationGuarantee::BestEffort
+        }
+    );
+    assert_eq!(dock.current_edge(), Some(Edge::Top));
+    assert_eq!(
+        h.prop(window, "_NET_WM_STRUT_PARTIAL"),
+        vec![0, 0, 24, 0, 0, 0, 0, 0, 0, h.width - 1, 0, 0]
+    );
+    assert_eq!(h.prop(window, "_NET_WM_STRUT"), vec![0, 0, 24, 0]);
+    assert_eq!(h.geometry(window), rect);
+
+    // Below a 32 px top panel, at 150 %: the strut covers panel and strip.
+    let mut monitor = h.monitor(1.5);
+    monitor.work_area = PhysicalRect::from_edges(0, 32, h.width as i32, h.height as i32);
+    let outcome = dock.update(&monitor, Edge::Top, 24).unwrap();
+    let below_panel = PhysicalRect::new(0, 32, h.width, 36);
+    assert!(matches!(outcome, DockOutcome::Reserved { rect, .. } if rect == below_panel));
+    assert_eq!(h.prop(window, "_NET_WM_STRUT"), vec![0, 0, 68, 0]);
+    assert_eq!(h.geometry(window), below_panel);
+
+    // The WM then shrinks the work area by our strut: the strip stays put.
+    monitor.work_area = PhysicalRect::from_edges(0, 68, h.width as i32, h.height as i32);
+    let DockOutcome::Reserved { rect: again, .. } = dock.update(&monitor, Edge::Top, 24).unwrap()
+    else {
+        panic!("not reserved");
+    };
+    assert_eq!(again, below_panel);
+
+    // Back to the bottom: the top strut is replaced, not added to.
+    dock.update(&h.monitor(1.0), Edge::Bottom, 24).unwrap();
+    assert_eq!(h.prop(window, "_NET_WM_STRUT"), vec![0, 0, 0, 24]);
+    assert_eq!(
+        h.prop(window, "_NET_WM_STRUT_PARTIAL"),
+        vec![0, 0, 0, 24, 0, 0, 0, 0, 0, 0, 0, h.width - 1]
+    );
+    dock.release().unwrap();
+    assert!(h.prop(window, "_NET_WM_STRUT").is_empty());
 }
 
 #[test]
@@ -188,7 +246,8 @@ fn existing_wm_states_are_kept() {
         &[skip, h.atom("_NET_WM_STATE_ABOVE")],
     );
     let mut dock = X11Dock::new(connection());
-    dock.reserve(handle(window), &h.monitor(1.0), 24).unwrap();
+    dock.reserve(handle(window), &h.monitor(1.0), Edge::Bottom, 24)
+        .unwrap();
     assert_eq!(
         h.prop(window, "_NET_WM_STATE"),
         vec![
@@ -204,7 +263,9 @@ fn mapped_windows_are_docked_through_client_messages() {
     let Some(h) = harness() else { return };
     let window = h.window(true);
     let mut dock = X11Dock::new(connection());
-    let outcome = dock.reserve(handle(window), &h.monitor(1.25), 24).unwrap();
+    let outcome = dock
+        .reserve(handle(window), &h.monitor(1.25), Edge::Bottom, 24)
+        .unwrap();
     assert!(matches!(outcome, DockOutcome::Reserved { rect, .. } if rect.height == 30));
     assert_eq!(h.prop(window, "_NET_WM_STRUT"), vec![0, 0, 0, 30]);
     // Once mapped, state belongs to the window manager; we must not write it.
@@ -217,18 +278,21 @@ fn strip_does_not_climb_when_the_wm_shrinks_the_work_area() {
     let window = h.window(false);
     let mut monitor = h.monitor(1.0);
     let mut dock = X11Dock::new(connection());
-    let DockOutcome::Reserved { rect: first, .. } =
-        dock.reserve(handle(window), &monitor, 24).unwrap()
+    let DockOutcome::Reserved { rect: first, .. } = dock
+        .reserve(handle(window), &monitor, Edge::Bottom, 24)
+        .unwrap()
     else {
         panic!("not reserved");
     };
     // What an EWMH WM would now report as the work area.
     monitor.work_area = PhysicalRect::from_edges(0, 0, h.width as i32, first.y);
-    let DockOutcome::Reserved { rect: again, .. } = dock.update(&monitor, 24).unwrap() else {
+    let DockOutcome::Reserved { rect: again, .. } =
+        dock.update(&monitor, Edge::Bottom, 24).unwrap()
+    else {
         panic!("not reserved");
     };
     assert_eq!(again, first);
-    assert_eq!(dock_rect(&monitor, 24, Some(&first)), first);
+    assert_eq!(dock_rect(&monitor, Edge::Bottom, 24, Some(&first)), first);
 }
 
 #[test]
@@ -236,8 +300,10 @@ fn redocking_another_window_releases_the_first() {
     let Some(h) = harness() else { return };
     let (a, b) = (h.window(false), h.window(false));
     let mut dock = X11Dock::new(connection());
-    dock.reserve(handle(a), &h.monitor(1.0), 24).unwrap();
-    dock.reserve(handle(b), &h.monitor(1.0), 24).unwrap();
+    dock.reserve(handle(a), &h.monitor(1.0), Edge::Bottom, 24)
+        .unwrap();
+    dock.reserve(handle(b), &h.monitor(1.0), Edge::Bottom, 24)
+        .unwrap();
     assert!(h.prop(a, "_NET_WM_STRUT").is_empty());
     assert_eq!(h.prop(b, "_NET_WM_STRUT"), vec![0, 0, 0, 24]);
     drop(dock);
@@ -251,7 +317,7 @@ fn errors_are_reported_not_panicked() {
     // A window id that does not exist.
     let bogus = h.window(false) + 1000;
     assert!(matches!(
-        dock.reserve(handle(bogus), &h.monitor(1.0), 24),
+        dock.reserve(handle(bogus), &h.monitor(1.0), Edge::Bottom, 24),
         Err(DockError::X11(_))
     ));
     // A monitor outside the X screen cannot be expressed as a strut.
@@ -263,7 +329,7 @@ fn errors_are_reported_not_panicked() {
         false,
     );
     assert!(matches!(
-        dock.reserve(handle(window), &off_screen, 24),
+        dock.reserve(handle(window), &off_screen, Edge::Bottom, 24),
         Err(DockError::InvalidGeometry(_))
     ));
 }
@@ -273,9 +339,11 @@ fn linux_dock_routes_x11_windows_to_the_x11_dock() {
     let Some(h) = harness() else { return };
     let window = h.window(false);
     let mut dock = LinuxDock::new(LinuxSession::Wayland { xwayland: true });
-    let outcome = dock.reserve(handle(window), &h.monitor(1.0), 24).unwrap();
+    let outcome = dock
+        .reserve(handle(window), &h.monitor(1.0), Edge::Bottom, 24)
+        .unwrap();
     assert!(matches!(outcome, DockOutcome::Reserved { .. }));
-    assert!(dock.update(&h.monitor(1.0), 24).is_ok());
+    assert!(dock.update(&h.monitor(1.0), Edge::Bottom, 24).is_ok());
     assert_eq!(h.prop(window, "_NET_WM_STRUT"), vec![0, 0, 0, 24]);
     dock.release().unwrap();
     assert!(h.prop(window, "_NET_WM_STRUT").is_empty());
@@ -397,7 +465,7 @@ fn platform_factories_work_under_x11() {
     let _ = probe.fullscreen_state(&h.monitor(1.0));
     let mut dock = buildrail_platform::dock::platform_dock();
     assert!(matches!(
-        dock.reserve(handle(window), &h.monitor(1.0), 24),
+        dock.reserve(handle(window), &h.monitor(1.0), Edge::Bottom, 24),
         Ok(DockOutcome::Reserved { .. })
     ));
 }

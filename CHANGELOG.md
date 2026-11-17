@@ -15,6 +15,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 - **An Animation switch in Settings › Strip,** for a building mark that turns while a build runs.
 - **A log of what BuildRail did recently,** kept for a few days and never holding a token. Settings › About › Open log folder shows it, which helps when something goes wrong.
 - **BuildRail has its own icon,** on the window and on the Windows program file.
+- **The strip can sit at the top of the screen.** Settings › Strip › Placement offers Top, Bottom and Floating. At the top, maximised windows start below the strip, and its details open downwards.
 
 ### Changed
 
@@ -32,6 +33,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 - **Pasting a token works.** Before, BuildRail could not reach the clipboard, so pasting into the token field did nothing.
 - **`--help` and `--version` show in a terminal on Windows.** Before, running them from PowerShell or Command Prompt printed nothing.
 - **Starting BuildRail a second time no longer opens a second strip.** The copy that is already running stays the only one.
+- **The strip sits right against the taskbar after you move it to another screen or start it again.** Before, on a screen with a different scale, and sometimes after a restart, a dark band could open between the strip and the taskbar.
+- **Details and the More builds list open on the strip's own screen.** Before, with the strip on a second screen, they opened on the first one.
 
 ## [0.2.0] - 2026-11-17
 

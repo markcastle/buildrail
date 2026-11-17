@@ -56,7 +56,7 @@ pub mod x11;
 /// than through the `platform_*` factories.
 #[cfg(windows)]
 pub mod windows {
-    pub use crate::win32::appbar::WindowsAppBar;
+    pub use crate::win32::appbar::{windows_appbar, Win32Shell, Win32Window, WindowsAppBar};
     pub use crate::win32::fullscreen::Win32FullscreenProbe;
     pub use crate::win32::instance::NamedMutexInstance;
     pub use crate::win32::monitors::Win32Monitors;

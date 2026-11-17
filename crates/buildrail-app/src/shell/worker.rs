@@ -12,17 +12,24 @@
 //!   ─────────                         ──────────────────────────────
 //!   start / apply(prefs) ──request──▶ DockController::start / apply
 //!   window moved         ──request──▶ DockController::window_moved
+//!   docked window moved,
+//!   resized or rescaled  ──request──▶ DockController::check
 //!                                     DockController::tick (timer)
 //!   drain() ◀──updates── commands, mode, hidden, monitors, position
 //!            ◀─ notify() ─ only when there is an update
 //! ```
 //!
+//! The monitor list is sent whenever it differs from the last one sent
+//! (the controller reads it again at every dock check), so the UI's copy,
+//! which places the pop-ups, follows displays and scales being changed.
+//!
 //! The UI never waits for the thread except in [`ShellLink::release`]
 //! (exit, restart), and then only for [`RELEASE_TIMEOUT`]. The thread's
 //! native calls (`SHAppBarMessage`, `SetWindowPos`, X11 requests on its
-//! own connection) are all allowed from any thread; `SetWindowPos` on the
-//! strip is delivered to the UI thread's message loop by Windows, which
-//! is why the UI must never block on this thread for long.
+//! own connection) are all allowed from any thread. The dock posts its
+//! `SetWindowPos` to the UI thread rather than waiting for it, so the
+//! thread never blocks on the UI either, and giving the edge back on exit
+//! (while the UI waits) is prompt.
 
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -68,6 +75,7 @@ enum Request {
     Apply(Box<DevicePrefs>),
     WindowMoved(PhysicalPosition),
     Monitors,
+    Check,
     Native(u32, usize, isize),
     Release(Sender<()>),
 }
@@ -196,6 +204,12 @@ impl ShellWorker {
         self.link.send(Request::Monitors);
     }
 
+    /// The docked window was moved, resized or changed scale: check the
+    /// dock now rather than at the next interval.
+    pub fn check_now(&self) {
+        self.link.send(Request::Check);
+    }
+
     /// Forwards a native window message (Windows AppBar callback).
     pub fn native_message(&self, message: u32, wparam: usize, lparam: isize) {
         self.link.send(Request::Native(message, wparam, lparam));
@@ -230,29 +244,25 @@ fn run(
 ) {
     let mut mode = shell.mode().clone();
     let mut hidden = shell.is_hidden();
+    let mut monitors_sent: Option<Vec<MonitorInfo>> = None;
     let mut next_tick = Instant::now() + tick;
     loop {
         let wait = next_tick.saturating_duration_since(Instant::now());
         let mut out = Vec::new();
         let commands = match inbox.recv_timeout(wait) {
-            Ok(Request::Start(window, prefs)) => {
-                let commands = shell.start(window, &prefs, Instant::now());
-                out.push(ShellUpdate::Monitors(shell.monitors()));
-                commands
-            }
-            Ok(Request::Apply(prefs)) => {
-                let commands = shell.apply(&prefs, Instant::now());
-                out.push(ShellUpdate::Monitors(shell.monitors()));
-                commands
-            }
+            Ok(Request::Start(window, prefs)) => shell.start(window, &prefs, Instant::now()),
+            Ok(Request::Apply(prefs)) => shell.apply(&prefs, Instant::now()),
             Ok(Request::WindowMoved(outer)) => {
                 out.extend(shell.window_moved(outer).map(ShellUpdate::Moved));
                 Vec::new()
             }
             Ok(Request::Monitors) => {
-                out.push(ShellUpdate::Monitors(shell.monitors()));
+                let list = shell.monitors();
+                out.push(ShellUpdate::Monitors(list.clone()));
+                monitors_sent = Some(list);
                 Vec::new()
             }
+            Ok(Request::Check) => shell.check(Instant::now()),
             Ok(Request::Native(message, wparam, lparam)) => {
                 shell.handle_native_message(message, wparam, lparam)
             }
@@ -274,6 +284,11 @@ fn run(
         };
         if !commands.is_empty() {
             out.insert(0, ShellUpdate::Commands(commands));
+        }
+        if monitors_sent.as_deref() != Some(shell.known_monitors()) {
+            let list = shell.known_monitors().to_vec();
+            out.push(ShellUpdate::Monitors(list.clone()));
+            monitors_sent = Some(list);
         }
         if *shell.mode() != mode {
             mode = shell.mode().clone();
@@ -417,6 +432,31 @@ mod tests {
         assert_eq!(f.notified.load(Ordering::SeqCst), after_start + 1);
         f.probe.set(FullscreenState::NotFullscreen);
         until(&f, |u| *u == ShellUpdate::Hidden(false));
+
+        // A check asked for by the UI runs at once and, changing nothing,
+        // wakes nobody.
+        let updates_before = f
+            .dock
+            .calls()
+            .iter()
+            .filter(|c| matches!(c, DockCall::Update { .. }))
+            .count();
+        let woken = f.notified.load(Ordering::SeqCst);
+        f.worker.check_now();
+        let deadline = Instant::now() + WAIT;
+        while f
+            .dock
+            .calls()
+            .iter()
+            .filter(|c| matches!(c, DockCall::Update { .. }))
+            .count()
+            == updates_before
+        {
+            assert!(Instant::now() < deadline, "no check");
+            std::thread::sleep(FAST);
+        }
+        std::thread::sleep(FAST * 5);
+        assert_eq!(f.notified.load(Ordering::SeqCst), woken);
 
         // Releasing gives the edge back, once.
         let link = f.worker.link();

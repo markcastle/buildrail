@@ -8,6 +8,8 @@ use eframe::egui::{
     pos2, CornerRadius, Rect, Role, Sense, Stroke, StrokeKind, Ui, Vec2, WidgetInfo,
 };
 
+use buildrail_platform::geometry::Edge;
+
 use super::{focus_ring, text};
 use crate::ui::theme::{mix, radius, type_style, Tokens};
 
@@ -33,12 +35,14 @@ const SLOT: f32 = 60.0;
 const SCREEN_WIDTH: f32 = 96.0;
 const MIN_TILE: f32 = 128.0;
 
-/// Draws the tiles, wrapping; returns the index of the one clicked.
+/// Draws the tiles, wrapping, with the strip on the chosen one's `edge`;
+/// returns the index of the one clicked.
 pub fn display_picker(
     ui: &mut Ui,
     tokens: &Tokens,
     displays: &[DisplayTile],
     chosen: Option<usize>,
+    edge: Edge,
 ) -> Option<usize> {
     let mut clicked = None;
     ui.horizontal_wrapped(|ui| {
@@ -92,24 +96,35 @@ pub fn display_picker(
             let r5 = CornerRadius::same(5);
             painter.rect_filled(screen, r5, screen_fill);
             if on {
-                // The strip, docked along the bottom edge.
-                let bar = Rect::from_min_max(
-                    pos2(
-                        screen.min.x,
-                        screen.max.y - (screen.height() * 0.12).max(4.0),
+                // The strip, docked along its edge.
+                let thickness = (screen.height() * 0.12).max(4.0);
+                let (bar, corners) = match edge {
+                    Edge::Bottom => (
+                        Rect::from_min_max(
+                            pos2(screen.min.x, screen.max.y - thickness),
+                            screen.max,
+                        ),
+                        CornerRadius {
+                            nw: 0,
+                            ne: 0,
+                            sw: 5,
+                            se: 5,
+                        },
                     ),
-                    screen.max,
-                );
-                painter.rect_filled(
-                    bar,
-                    CornerRadius {
-                        nw: 0,
-                        ne: 0,
-                        sw: 5,
-                        se: 5,
-                    },
-                    tokens.progress,
-                );
+                    Edge::Top => (
+                        Rect::from_min_max(
+                            screen.min,
+                            pos2(screen.max.x, screen.min.y + thickness),
+                        ),
+                        CornerRadius {
+                            nw: 5,
+                            ne: 5,
+                            sw: 0,
+                            se: 0,
+                        },
+                    ),
+                };
+                painter.rect_filled(bar, corners, tokens.progress);
             }
             painter.rect_stroke(
                 screen,

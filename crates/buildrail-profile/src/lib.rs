@@ -119,7 +119,7 @@
 //! name = "DELL U2720Q"        # fallback match when the id changed
 //!
 //! [placement]
-//! mode = "floating"           # or "docked-bottom"
+//! mode = "floating"           # or "docked-bottom" (the default), "docked-top"
 //! position = { x = 120, y = 40 }
 //!
 //! [connections.work-github]

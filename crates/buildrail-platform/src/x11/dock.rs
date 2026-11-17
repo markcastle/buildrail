@@ -10,18 +10,18 @@ use super::{
     merge_atoms, x11_err, X11Connection, X11Error, ALL_DESKTOPS, NET_WM_STATE_ADD,
     SOURCE_APPLICATION,
 };
-use crate::dock::strut::{bottom_strut, StrutPartial};
+use crate::dock::strut::{edge_strut, StrutPartial};
 use crate::dock::{
     x11_window_id, DockError, DockOutcome, EdgeDock, ReservationGuarantee, UnsupportedReason,
 };
-use crate::geometry::{dock_rect, MonitorInfo, PhysicalRect};
+use crate::geometry::{dock_rect, Edge, MonitorInfo, PhysicalRect};
 
-/// Docks an X11 window at the bottom of a monitor with EWMH struts.
+/// Docks an X11 window at the top or bottom of a monitor with EWMH struts.
 #[derive(Debug)]
 pub struct X11Dock {
     x: Arc<X11Connection>,
     window: Option<Window>,
-    current: Option<PhysicalRect>,
+    current: Option<(Edge, PhysicalRect)>,
 }
 
 impl X11Dock {
@@ -36,18 +36,27 @@ impl X11Dock {
 
     /// The rect currently reserved, if any.
     pub fn current_rect(&self) -> Option<PhysicalRect> {
-        self.current
+        self.current.map(|(_, rect)| rect)
+    }
+
+    /// The edge currently reserved, if any.
+    pub fn current_edge(&self) -> Option<Edge> {
+        self.current.map(|(edge, _)| edge)
     }
 
     fn apply(
         &mut self,
         window: Window,
         monitor: &MonitorInfo,
+        edge: Edge,
         height: u32,
         force: bool,
     ) -> Result<DockOutcome, DockError> {
-        let own = self.current.filter(|_| self.window == Some(window));
-        let rect = dock_rect(monitor, height, own.as_ref());
+        let own = self
+            .current
+            .filter(|(e, _)| self.window == Some(window) && *e == edge)
+            .map(|(_, rect)| rect);
+        let rect = dock_rect(monitor, edge, height, own.as_ref());
         let reserved = DockOutcome::Reserved {
             rect,
             guarantee: ReservationGuarantee::BestEffort,
@@ -56,14 +65,23 @@ impl X11Dock {
             return Ok(reserved);
         }
         let (screen_width, screen_height) = self.x.root_size()?;
-        let strut = bottom_strut(screen_width, screen_height, &rect)
+        let strut = edge_strut(edge, screen_width, screen_height, &rect)
             .ok_or(DockError::InvalidGeometry(rect))?;
         self.mark_as_dock(window)?;
         self.set_strut(window, &strut)?;
         self.place(window, &rect)?;
         self.window = Some(window);
-        self.current = Some(rect);
-        tracing::debug!("X11 dock reserved {rect}");
+        self.current = Some((edge, rect));
+        tracing::info!(
+            edge = %edge,
+            monitor = %monitor.id,
+            bounds = %monitor.bounds,
+            work_area = %monitor.work_area,
+            scale = monitor.scale_factor,
+            reserved = %rect,
+            strut = ?strut.to_cardinals(),
+            "reserved the screen edge"
+        );
         Ok(reserved)
     }
 
@@ -156,7 +174,9 @@ impl X11Dock {
         self.window = None;
         self.x.delete(window, a._NET_WM_STRUT_PARTIAL)?;
         self.x.delete(window, a._NET_WM_STRUT)?;
-        self.x.conn.flush().map_err(x11_err)
+        self.x.conn.flush().map_err(x11_err)?;
+        tracing::info!(window, "released the screen edge");
+        Ok(())
     }
 }
 
@@ -165,6 +185,7 @@ impl EdgeDock for X11Dock {
         &mut self,
         window: RawWindowHandle,
         monitor: &MonitorInfo,
+        edge: Edge,
         strip_height_logical: u32,
     ) -> Result<DockOutcome, DockError> {
         let Some(id) = x11_window_id(&window) else {
@@ -175,16 +196,17 @@ impl EdgeDock for X11Dock {
         if self.window.is_some_and(|w| w != id) {
             self.release()?;
         }
-        self.apply(id, monitor, strip_height_logical, true)
+        self.apply(id, monitor, edge, strip_height_logical, true)
     }
 
     fn update(
         &mut self,
         monitor: &MonitorInfo,
+        edge: Edge,
         strip_height_logical: u32,
     ) -> Result<DockOutcome, DockError> {
         let window = self.window.ok_or(DockError::NotReserved)?;
-        self.apply(window, monitor, strip_height_logical, false)
+        self.apply(window, monitor, edge, strip_height_logical, false)
     }
 
     fn release(&mut self) -> Result<(), DockError> {

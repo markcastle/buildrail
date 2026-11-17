@@ -28,15 +28,6 @@ fn hwnd_from(raw: isize) -> HWND {
     raw as HWND
 }
 
-fn to_rect(rect: &PhysicalRect) -> RECT {
-    RECT {
-        left: rect.x,
-        top: rect.y,
-        right: rect.right(),
-        bottom: rect.bottom(),
-    }
-}
-
 /// Converts a Win32 rect. An inverted rect (the shell can return one from
 /// `ABM_QUERYPOS` when it squashes a bar) keeps its bottom-right corner,
 /// which is what the AppBar maths relies on.

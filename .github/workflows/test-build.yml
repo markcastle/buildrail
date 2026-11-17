@@ -8,6 +8,12 @@ name: Test build
 #
 # This is a try-it build, not a release: it has no update signing key, so it
 # never updates itself, and nothing is published.
+#
+# The smoke run then starts that build's demo on a real Windows desktop,
+# takes a screenshot, closes it, and keeps the screenshot and BuildRail's
+# log as an artifact ("smoke-run"), so docking can be seen and read without
+# a person at a Windows machine. It fails only if the app died early or
+# panicked; a missing screenshot is a warning.
 
 on:
   pull_request:
@@ -56,6 +62,14 @@ jobs:
           echo "zip=$name.zip" >> "$GITHUB_OUTPUT"
           ls -l "$name" "$name.zip"
 
+      # The program on its own, for the smoke run below; kept a day.
+      - uses: actions/upload-artifact@v7
+        with:
+          name: smoke-run-program
+          path: target/release/buildrail.exe
+          if-no-files-found: error
+          retention-days: 1
+
       # Uploaded as the zip itself (archive: false), so the download is the
       # zip and not a zip inside a zip.
       - uses: actions/upload-artifact@v7
@@ -63,4 +77,93 @@ jobs:
           path: ${{ steps.package.outputs.zip }}
           archive: false
           if-no-files-found: error
+          retention-days: 14
+
+  smoke:
+    name: Windows smoke run
+    needs: windows
+    runs-on: windows-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      SMOKE_DIR: ${{ github.workspace }}\buildrail-smoke
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: smoke-run-program
+          path: program
+
+      # Start the demo with its files in a scratch folder, give it ten
+      # seconds to dock, photograph the whole desktop, then ask it to close
+      # (WM_CLOSE, as the taskbar would) so the log also shows the screen
+      # edge being given back.
+      - name: Run the demo and take a screenshot
+        id: run
+        run: |
+          New-Item -ItemType Directory -Force -Path $env:SMOKE_DIR | Out-Null
+          $env:BUILDRAIL_CONFIG_DIR = $env:SMOKE_DIR
+          $env:RUST_LOG = 'warn,buildrail_app=debug,buildrail_platform=debug'
+          $out = Join-Path $env:SMOKE_DIR 'stdout.txt'
+          $err = Join-Path $env:SMOKE_DIR 'stderr.txt'
+          $p = Start-Process -FilePath 'program\buildrail.exe' -ArgumentList '--demo' -PassThru `
+            -RedirectStandardOutput $out -RedirectStandardError $err
+          Start-Sleep -Seconds 10
+          $alive = -not $p.HasExited
+          try {
+            Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+            $screen = [System.Windows.Forms.SystemInformation]::VirtualScreen
+            $bitmap = New-Object System.Drawing.Bitmap $screen.Width, $screen.Height
+            $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+            $graphics.CopyFromScreen($screen.Left, $screen.Top, 0, 0, $bitmap.Size)
+            $bitmap.Save((Join-Path $env:SMOKE_DIR 'screenshot.png'), [System.Drawing.Imaging.ImageFormat]::Png)
+            $graphics.Dispose()
+            $bitmap.Dispose()
+            Write-Output "Screenshot: $($screen.Width)x$($screen.Height) at ($($screen.Left), $($screen.Top))"
+          } catch {
+            Write-Output "::warning::No screenshot of the desktop: $_"
+          }
+          if ($alive) {
+            taskkill /PID $p.Id | Out-Null
+            if (-not $p.WaitForExit(10000)) {
+              Write-Output "::warning::BuildRail did not close within 10 s of being asked; stopping it"
+              Stop-Process -Id $p.Id -Force
+            }
+          } else {
+            Write-Output "::error::buildrail.exe exited within 10 seconds (exit code $($p.ExitCode))"
+          }
+          "alive=$alive" >> $env:GITHUB_OUTPUT
+
+      - name: Check the log
+        run: |
+          $logs = Get-ChildItem -Path (Join-Path $env:SMOKE_DIR 'logs') -Filter '*.log' -ErrorAction SilentlyContinue
+          if (-not $logs) { Write-Output "::warning::BuildRail wrote no log file" }
+          $files = @($logs | ForEach-Object { $_.FullName }) + @(
+            (Join-Path $env:SMOKE_DIR 'stdout.txt'),
+            (Join-Path $env:SMOKE_DIR 'stderr.txt')
+          ) | Where-Object { Test-Path $_ }
+          foreach ($file in $files) {
+            Write-Output "===== $file"
+            Get-Content $file
+          }
+          $text = ($files | ForEach-Object { Get-Content $_ -Raw }) -join "`n"
+          $failed = $false
+          if ($text -match 'panicked at|BuildRail crashed') {
+            Write-Output "::error::BuildRail panicked during the smoke run (see the log above)"
+            $failed = $true
+          }
+          if ('${{ steps.run.outputs.alive }}' -ne 'True') { $failed = $true }
+          if ($failed) { exit 1 }
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: smoke-run
+          path: |
+            ${{ env.SMOKE_DIR }}\screenshot.png
+            ${{ env.SMOKE_DIR }}\logs
+            ${{ env.SMOKE_DIR }}\stdout.txt
+            ${{ env.SMOKE_DIR }}\stderr.txt
+          if-no-files-found: warn
           retention-days: 14
