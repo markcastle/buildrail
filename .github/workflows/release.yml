@@ -1,20 +1,34 @@
 name: Release
 
-# Builds the Windows executable.
+# Releasing is automatic. There are no tags to push and nothing to click.
 #
-# * Push a tag like `v0.1.0`  -> builds, then publishes a GitHub release with
-#   the zip attached.
-# * "Run workflow" button     -> builds only; download the zip from the run's
-#   artifacts. Handy for trying a build without cutting a release.
-# * A pull request that edits this file -> builds only, so changes to the
-#   workflow are tested before they are merged.
+#   To release: merge a pull request that sets a new version in the root
+#   Cargo.toml and adds a matching section to CHANGELOG.md.
+#
+# What runs when:
+#
+# * Every pull request  -> builds the Windows exe and attaches the zip to the
+#   run, so any change can be tried before it is merged. It also checks that
+#   the version has a changelog section, so a release cannot fail on that
+#   after the merge.
+# * Every push to main  -> builds the exe. If the version in Cargo.toml has
+#   no finished release yet, it creates the tag and the GitHub release from
+#   this commit, with the changelog section as the notes and the zip attached.
+#   If that version is already released, it only builds.
+# * "Run workflow" on main -> the same as a push to main. Use it to retry.
+#
+# A release with no zip attached counts as unfinished (a failed earlier
+# attempt, or one created by hand) and is replaced, tag included.
 on:
   push:
-    tags: ["v*"]
-  workflow_dispatch:
+    branches: [main]
   pull_request:
-    paths:
-      - .github/workflows/release.yml
+  workflow_dispatch:
+
+# One release run at a time per branch, and never cancel one half-way.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
@@ -26,78 +40,92 @@ jobs:
   windows:
     name: Windows x64 exe
     runs-on: windows-latest
-    outputs:
-      asset: ${{ steps.package.outputs.asset }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-
-      - name: Check the tag matches the crate version
-        if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write # create the tag and the release on main
+    defaults:
+      run:
         shell: bash
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Read the version and decide whether to release
+        id: plan
         run: |
           version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "buildrail-app") | .version')
-          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
-            echo "::error::Tag $GITHUB_REF_NAME does not match the version in Cargo.toml ($version). Bump [workspace.package] version, or tag v$version."
+          tag="v$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+          # The changelog section becomes the release notes. Checked on pull
+          # requests too, so this can never be the reason a release fails.
+          awk -v v="$version" '
+            /^## / { on = ($2 == v) ; next }
+            on { print }
+          ' CHANGELOG.md > release-notes.md
+          if ! grep -q '[^[:space:]]' release-notes.md; then
+            echo "::error file=CHANGELOG.md::CHANGELOG.md has no section for $version. Add a '## $version' heading with what changed."
             exit 1
           fi
+
+          release=false
+          if [[ "$GITHUB_EVENT_NAME" != "pull_request" && "$GITHUB_REF" == "refs/heads/main" ]]; then
+            zips=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$tag" --jq '[.assets[] | select(.name | endswith(".zip"))] | length' 2>/dev/null || echo 0)
+            if [[ "$zips" == "0" ]]; then release=true; fi
+          fi
+          echo "release=$release" >> "$GITHUB_OUTPUT"
+
+          if [[ "$release" == "true" ]]; then
+            echo "asset=buildrail-$tag-windows-x64" >> "$GITHUB_OUTPUT"
+            echo "### Releasing $tag from ${GITHUB_SHA::7}" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "asset=buildrail-$version-${GITHUB_SHA::7}-windows-x64" >> "$GITHUB_OUTPUT"
+            echo "### Test build of $version (${GITHUB_SHA::7}), not a release" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
 
       - name: Build
         run: cargo build --release --locked -p buildrail-app
 
       - name: Package
-        id: package
-        shell: bash
         run: |
-          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
-            name="buildrail-$GITHUB_REF_NAME-windows-x64"
-          else
-            name="buildrail-${GITHUB_SHA::7}-windows-x64"
-          fi
+          name="${{ steps.plan.outputs.asset }}"
           mkdir "$name"
-          cp target/release/buildrail.exe README.md "$name/"
+          cp target/release/buildrail.exe README.md CHANGELOG.md "$name/"
           # Double-click helper: the real strip against made-up builds, with
           # no tokens, network or setup.
           printf '@echo off\r\nstart "" "%%~dp0buildrail.exe" --demo\r\n' > "$name/Try the demo.cmd"
           7z a "$name.zip" "$name" > /dev/null
           sha256sum "$name.zip" > "$name.zip.sha256"
-          echo "asset=$name" >> "$GITHUB_OUTPUT"
           ls -l "$name" "$name.zip"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: ${{ steps.package.outputs.asset }}
+          name: ${{ steps.plan.outputs.asset }}
           path: |
-            ${{ steps.package.outputs.asset }}.zip
-            ${{ steps.package.outputs.asset }}.zip.sha256
+            ${{ steps.plan.outputs.asset }}.zip
+            ${{ steps.plan.outputs.asset }}.zip.sha256
           if-no-files-found: error
 
-  publish:
-    name: Publish GitHub release
-    if: startsWith(github.ref, 'refs/tags/v')
-    needs: windows
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          name: ${{ needs.windows.outputs.asset }}
-      - name: Create the release
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: Publish the release
+        if: steps.plan.outputs.release == 'true'
         run: |
-          zip="${{ needs.windows.outputs.asset }}.zip"
-          # The tag may have come from `git push` (no release yet) or from the
-          # "Draft a new release" page on GitHub (release already exists).
-          # Handle both: create it if missing, otherwise attach the files.
-          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
-            gh release upload "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --clobber "$zip" "$zip.sha256"
-          else
-            gh release create "$GITHUB_REF_NAME" \
-              --repo "$GITHUB_REPOSITORY" \
-              --title "BuildRail $GITHUB_REF_NAME" \
-              --generate-notes \
-              "$zip" "$zip.sha256"
+          tag="${{ steps.plan.outputs.tag }}"
+          zip="${{ steps.plan.outputs.asset }}.zip"
+          # Clear away an unfinished release or a stray tag for this version,
+          # so the tag always points at the commit the exe was built from.
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            gh release delete "$tag" --repo "$GITHUB_REPOSITORY" --cleanup-tag --yes
+          elif gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$tag" > /dev/null 2>&1; then
+            gh api -X DELETE "repos/$GITHUB_REPOSITORY/git/refs/tags/$tag"
           fi
+          gh release create "$tag" \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "BuildRail $tag" \
+            --notes-file release-notes.md \
+            "$zip" "$zip.sha256"
+          echo "Released: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/tag/$tag" >> "$GITHUB_STEP_SUMMARY"

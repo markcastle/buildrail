@@ -148,22 +148,24 @@ Set `BUILDRAIL_CONFIG_DIR` to point the app at a scratch folder, so you can expe
 
 ## Releasing
 
-The Release workflow builds the Windows executable.
+Releasing is automatic. There are no tags to push and nothing to click.
 
-- **To try a build without releasing**, open the Actions tab, choose Release, and press "Run workflow". The zip is attached to the run as an artifact.
-- **To publish a release**, set the version in the root `Cargo.toml`, add a section to `CHANGELOG.md`, merge, then create a matching tag. The workflow refuses a tag that does not match the version. You can create the tag either way:
-    - On GitHub: Releases, "Draft a new release", type the tag (for example `v0.1.0`), target `main`, and publish. The workflow attaches the zip a few minutes later.
-    - From a clone, with the two commands below.
+**To release**, merge a pull request that does two things:
 
-```bash
-git tag v0.1.0
-```
+1. Sets the new version in the root `Cargo.toml`.
+2. Adds a `## <version>` section to `CHANGELOG.md` saying what changed.
 
-```bash
-git push origin v0.1.0
-```
+When that reaches `main`, the Release workflow builds the Windows executable, creates the tag and the GitHub release from that exact commit, uses the changelog section as the release notes, and attaches the zip and its SHA-256 checksum. The zip holds `buildrail.exe`, a `Try the demo.cmd` you can double-click, this README and the changelog.
 
-The release gets a zip containing `buildrail.exe`, a `Try the demo.cmd` you can double-click to see the strip with made-up builds, and this README, plus a SHA-256 checksum. The exe is not code-signed, so Windows SmartScreen will warn the first time it runs.
+A few things follow from this.
+
+- **Every pull request gets a test build.** The zip is attached to the pull request's Release run under Artifacts, so a change can be tried on Windows before it is merged.
+- **A pull request fails early** if its version has no changelog section, so that can never break a release after the merge.
+- **Merging without a version bump releases nothing.** The change waits on `main` for the next version.
+- **If a release run fails**, fix the cause and press "Run workflow" on the Release workflow for `main`. A release with no zip attached counts as unfinished and is replaced, tag included.
+- **Do not create tags or releases by hand.** The workflow owns them, which is what keeps the tag, the version and the exe in step.
+
+The exe is not code-signed, so Windows SmartScreen will warn the first time it runs.
 
 ## Acceptance checklist for each operating system
 

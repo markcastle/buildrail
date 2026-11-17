@@ -2,7 +2,7 @@
 
 Every release of BuildRail, newest first. Versions follow [semantic versioning](https://semver.org/): while the version starts with 0, a change in the middle number can change how things look or behave.
 
-When you prepare a release, add a section here and set the same version in the root `Cargo.toml`. The release workflow refuses a tag that does not match.
+To release, add a section here and set the same version in the root `Cargo.toml`. Merging that to `main` publishes the release automatically, with the section below as its notes.
 
 ## 0.2.0
 
@@ -19,6 +19,7 @@ The interface is restyled on the Task Rail design system.
 ### Added
 
 - A screenshot test that renders every screen in both themes into `docs/images`.
+- Releases are automatic: merging a version bump to `main` builds the Windows exe and publishes the release. Every pull request gets a test build.
 
 ## 0.1.0
 
