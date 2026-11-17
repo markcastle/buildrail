@@ -1,0 +1,12 @@
+[package]
+name = "buildrail-update"
+description = "BuildRail's self-update: the signed manifest format, verification, and the client that installs an update."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true

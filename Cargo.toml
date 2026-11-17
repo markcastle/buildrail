@@ -13,6 +13,7 @@ buildrail-core = { path = "crates/buildrail-core" }
 buildrail-profile = { path = "crates/buildrail-profile" }
 buildrail-providers = { path = "crates/buildrail-providers" }
 buildrail-platform = { path = "crates/buildrail-platform" }
+buildrail-update = { path = "crates/buildrail-update", default-features = false }
 async-trait = "0.1"
 chrono = { version = "0.4", default-features = false, features = ["std", "clock", "serde"] }
 serde = { version = "1", features = ["derive"] }
