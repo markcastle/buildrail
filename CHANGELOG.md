@@ -12,6 +12,15 @@ The pull request check refuses a version that is not MAJOR.MINOR.PATCH or that i
 
 To release, add a section here and set the same version in the root `Cargo.toml`. Merging that to `main` publishes the release automatically, with the section below as its notes.
 
+## Unreleased
+
+Changes merged to `main` that are waiting for the next version. When you release, rename this heading to the new version and start a fresh Unreleased section.
+
+### Changed
+
+- Releases are automatic: merging a version bump to `main` builds the Windows exe and publishes the release. Every pull request gets a test build.
+- Pull requests check that the version is a semantic version and never lower than the latest release.
+
 ## 0.2.0
 
 The interface is restyled on the Task Rail design system.
@@ -27,7 +36,6 @@ The interface is restyled on the Task Rail design system.
 ### Added
 
 - A screenshot test that renders every screen in both themes into `docs/images`.
-- Releases are automatic: merging a version bump to `main` builds the Windows exe and publishes the release. Every pull request gets a test build.
 
 ## 0.1.0
 

@@ -153,7 +153,7 @@ Releasing is automatic. There are no tags to push and nothing to click.
 **To release**, merge a pull request that does two things:
 
 1. Sets the new version in the root `Cargo.toml`.
-2. Adds a `## <version>` section to `CHANGELOG.md` saying what changed.
+2. Renames the `## Unreleased` section of `CHANGELOG.md` to `## <version>`, and starts a fresh Unreleased section above it.
 
 When that reaches `main`, the Release workflow builds the Windows executable, creates the tag and the GitHub release from that exact commit, uses the changelog section as the release notes, and attaches the zip and its SHA-256 checksum. The zip holds `buildrail.exe`, a `Try the demo.cmd` you can double-click, this README and the changelog.
 
@@ -162,7 +162,7 @@ A few things follow from this.
 - **Every pull request gets a test build.** The zip is attached to the pull request's Release run under Artifacts, so a change can be tried on Windows before it is merged.
 - **Versions follow semantic versioning** (MAJOR.MINOR.PATCH); `CHANGELOG.md` says which number to raise.
 - **A pull request fails early** if its version is not a semantic version, is lower than the latest release, or has no changelog section, so none of those can break a release after the merge.
-- **Merging without a version bump releases nothing.** The change waits on `main` for the next version.
+- **Merging without a version bump releases nothing.** The change waits on `main` for the next version; note it under Unreleased in the changelog.
 - **If a release run fails**, fix the cause and press "Run workflow" on the Release workflow for `main`. A release with no zip attached counts as unfinished and is replaced, tag included.
 - **Do not create tags or releases by hand.** The workflow owns them, which is what keeps the tag, the version and the exe in step.
 
