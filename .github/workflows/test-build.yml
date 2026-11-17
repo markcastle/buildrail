@@ -100,25 +100,7 @@ jobs:
       # software OpenGL beside the exe, for this test run only. It is never
       # part of a download.
       - name: Add software OpenGL for the test machine
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-          MESA_VERSION: "26.2.7"
-        run: |
-          gh release download "$MESA_VERSION" --repo pal1000/mesa-dist-win \
-            --pattern "mesa3d-$MESA_VERSION-release-msvc.7z" --output mesa.7z
-          7z x mesa.7z -omesa > /dev/null
-          # The folder layout inside the archive has changed between Mesa
-          # releases, so look for the 64-bit opengl32.dll wherever it is.
-          dll=$(find mesa -ipath '*x64*' -name opengl32.dll | head -n 1)
-          if [ -z "$dll" ]; then
-            echo "::error::No 64-bit opengl32.dll in the Mesa archive"; find mesa -maxdepth 2; exit 1
-          fi
-          dir=$(dirname "$dll")
-          for name in opengl32.dll libgallium_wgl.dll libglapi.dll; do
-            if [ -f "$dir/$name" ]; then cp "$dir/$name" program/; fi
-          done
-          ls -l program
+        uses: ssciwr/setup-mesa-dist-win@v3
 
       # Start the demo with its files in a scratch folder, give it ten
       # seconds to dock, photograph the whole desktop, then ask it to close
