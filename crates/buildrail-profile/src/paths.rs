@@ -46,12 +46,10 @@ impl AppPaths {
     /// The standard per-user locations for this OS.
     pub fn discover() -> Result<Self, NoHomeDir> {
         let dirs = ProjectDirs::from("dev", "BuildRail", "BuildRail").ok_or(NoHomeDir)?;
-        Ok(Self::from_dirs(
-            dirs.config_dir(),
-            dirs.config_local_dir(),
-            dirs.cache_dir(),
+        Ok(
+            Self::from_dirs(dirs.config_dir(), dirs.config_local_dir(), dirs.cache_dir())
+                .with_logs_dir(dirs.data_local_dir().join(LOGS_DIR)),
         )
-        .with_logs_dir(dirs.data_local_dir().join(LOGS_DIR)))
     }
 
     /// Explicit directories, for tests and portable installs. Logs go in

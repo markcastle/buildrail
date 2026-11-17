@@ -620,3 +620,71 @@ fn preview_without_source_and_with_broken_store() {
     };
     assert!(result.unwrap_err().message().contains("not available"));
 }
+
+#[test]
+fn prepare_for_restart_stops_flushes_and_releases_everything() {
+    use buildrail_platform::single_instance::{InMemoryInstances, SingleInstance};
+
+    use crate::app::lifecycle::{Held, InstanceLock};
+
+    let mut t = T::new();
+    t.connect(ProviderKind::GitHub, "work", "tok");
+    t.world
+        .github
+        .set("keevoro", Ok(vec![record("1", BuildStatus::Passed)]));
+    t.pin(gh_draft("Keevoro", "work", "keevoro")).unwrap();
+    t.wait_for("passed", |s| {
+        s.entries.first().is_some_and(|e| e.status_text == "Passed")
+    });
+    let instances = InMemoryInstances::new();
+    let lock = Arc::new(InstanceLock::new(instances.acquire("BuildRail").unwrap()));
+    t.app.lifecycle().hold(lock.clone());
+
+    struct Stuck;
+    impl Held for Stuck {
+        fn name(&self) -> &'static str {
+            "screen edge"
+        }
+        fn release(&self) -> Result<(), String> {
+            Err("not in time".into())
+        }
+    }
+
+    // Everything released, the cache written for the next process.
+    std::fs::remove_file(t.paths.snapshot_cache_file()).ok();
+    std::fs::remove_file(t.paths.device_prefs_file()).unwrap();
+    assert!(t.app.prepare_for_restart().is_ok());
+    assert!(
+        !instances.is_held("BuildRail"),
+        "the next instance can start"
+    );
+    assert!(t.paths.device_prefs_file().exists());
+    let cached = t.paths.snapshot_cache().load();
+    assert_eq!(cached.len(), 1);
+    assert_eq!(
+        cached[0].record.as_ref().map(|r| r.status),
+        Some(BuildStatus::Passed)
+    );
+    // The engine is stopped.
+    t.app.refresh_now();
+
+    // What could not be released is reported, and calling again is safe.
+    t.app.lifecycle().hold(Arc::new(Stuck));
+    let error = t.app.prepare_for_restart().unwrap_err();
+    assert_eq!(error.problems, ["screen edge: not in time"]);
+    assert!(error.to_string().contains("not everything was ready"));
+}
+
+#[test]
+fn dialogs_and_the_log_folder_go_through_their_ports() {
+    let t = T::new();
+    t.world.dialogs.answer(Some("/tmp/in.toml".into()));
+    assert_eq!(t.app.choose_import_file(), Some("/tmp/in.toml".into()));
+    assert_eq!(t.app.choose_export_file(), None);
+    assert_eq!(t.world.dialogs.asked(), ["open", "save builds.toml"]);
+    assert_eq!(t.app.logs_dir(), Some(t.paths.logs_dir()));
+    assert!(t.app.open_log_folder().is_err(), "no folder yet");
+    std::fs::create_dir_all(t.paths.logs_dir()).unwrap();
+    t.app.open_log_folder().unwrap();
+    assert_eq!(t.world.folders.opened(), [t.paths.logs_dir().to_owned()]);
+}

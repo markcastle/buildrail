@@ -114,12 +114,7 @@ impl Held for InstanceLock {
     }
 
     fn release(&self) -> Result<(), String> {
-        drop(
-            self.0
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .take(),
-        );
+        drop(self.0.lock().unwrap_or_else(PoisonError::into_inner).take());
         Ok(())
     }
 }

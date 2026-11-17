@@ -57,24 +57,20 @@ impl SettingsWindow {
                     }
                 },
             );
-            g.stack(
-                "Or type where to save it",
-                None,
-                |ui| {
-                    ui.horizontal(|ui| {
-                        let width = (ui.available_width() - 100.0).max(160.0);
-                        TextField::new(&mut self.export_path, "Save to")
-                            .placeholder("/home/you/Documents/builds.toml")
-                            .width(width)
-                            .show(ui, tokens);
-                        let ready = !self.export_path.trim().is_empty();
-                        if button(ui, tokens, ButtonKind::Plain, "Export", ready, false).clicked() {
-                            let path = self.export_path.trim().to_owned();
-                            self.share_message = Some(save_profile(Path::new(&path), &text));
-                        }
-                    });
-                },
-            );
+            g.stack("Or type where to save it", None, |ui| {
+                ui.horizontal(|ui| {
+                    let width = (ui.available_width() - 100.0).max(160.0);
+                    TextField::new(&mut self.export_path, "Save to")
+                        .placeholder("/home/you/Documents/builds.toml")
+                        .width(width)
+                        .show(ui, tokens);
+                    let ready = !self.export_path.trim().is_empty();
+                    if button(ui, tokens, ButtonKind::Plain, "Export", ready, false).clicked() {
+                        let path = self.export_path.trim().to_owned();
+                        self.share_message = Some(save_profile(Path::new(&path), &text));
+                    }
+                });
+            });
         });
         if let Some((tone, message)) = &self.share_message {
             widgets::toast(ui, tokens, *tone, message);
@@ -107,29 +103,24 @@ impl SettingsWindow {
                             }
                         },
                     );
-                    g.stack(
-                        "Or type its path",
-                        None,
-                        |ui| {
-                            ui.horizontal(|ui| {
-                                let width = (ui.available_width() - 90.0).max(160.0);
-                                TextField::new(&mut self.import_path, "Load file")
-                                    .placeholder("/home/you/Downloads/builds.toml")
-                                    .width(width)
-                                    .show(ui, tokens);
-                                let ready = !self.import_path.trim().is_empty();
-                                if button(ui, tokens, ButtonKind::Plain, "Load", ready, false)
-                                    .clicked()
-                                {
-                                    let path = self.import_path.trim().to_owned();
-                                    match read_profile(Path::new(&path)) {
-                                        Ok(text) => push(inputs, ImportInput::SetText(text)),
-                                        Err(error) => load_error = Some(error),
-                                    }
+                    g.stack("Or type its path", None, |ui| {
+                        ui.horizontal(|ui| {
+                            let width = (ui.available_width() - 90.0).max(160.0);
+                            TextField::new(&mut self.import_path, "Load file")
+                                .placeholder("/home/you/Downloads/builds.toml")
+                                .width(width)
+                                .show(ui, tokens);
+                            let ready = !self.import_path.trim().is_empty();
+                            if button(ui, tokens, ButtonKind::Plain, "Load", ready, false).clicked()
+                            {
+                                let path = self.import_path.trim().to_owned();
+                                match read_profile(Path::new(&path)) {
+                                    Ok(text) => push(inputs, ImportInput::SetText(text)),
+                                    Err(error) => load_error = Some(error),
                                 }
-                            });
-                        },
-                    );
+                            }
+                        });
+                    });
                     g.stack(
                         "Or paste it",
                         Some("A profile is a short text file that starts with “version = 1”."),

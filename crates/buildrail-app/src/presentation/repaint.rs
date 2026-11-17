@@ -202,13 +202,19 @@ mod tests {
     #[test]
     fn age_boundaries_match_the_words() {
         let anchor = t(0);
-        for secs in [-90, -1, 0, 1, 59, 60, 61, 119, 3_599, 3_600, 7_000, 86_399, 86_400, 200_000] {
+        for secs in [
+            -90, -1, 0, 1, 59, 60, 61, 119, 3_599, 3_600, 7_000, 86_399, 86_400, 200_000,
+        ] {
             let now = anchor + TimeDelta::seconds(secs);
             let next = next_age_change(anchor, now);
             assert!(next > now, "{secs}: {next} after {now}");
             let words = |at: DateTime<Utc>| (age_short(at - anchor), age_long(at - anchor));
             // Nothing changes before the boundary…
-            assert_eq!(words(now), words(next - TimeDelta::milliseconds(1)), "{secs}");
+            assert_eq!(
+                words(now),
+                words(next - TimeDelta::milliseconds(1)),
+                "{secs}"
+            );
             // …and it does change at it.
             assert_ne!(words(now), words(next), "{secs}");
         }
@@ -310,9 +316,18 @@ mod tests {
         assert!(planner.animating(&building));
         assert_eq!(planner.next_repaint(&building, now), Some(ANIMATION_STEP));
         for off in [
-            Motion { enabled: false, ..on },
-            Motion { reduced: true, ..on },
-            Motion { visible: false, ..on },
+            Motion {
+                enabled: false,
+                ..on
+            },
+            Motion {
+                reduced: true,
+                ..on
+            },
+            Motion {
+                visible: false,
+                ..on
+            },
         ] {
             assert!(!RepaintPlanner::new(off).animating(&building), "{off:?}");
         }

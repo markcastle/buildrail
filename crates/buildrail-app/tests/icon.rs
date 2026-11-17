@@ -76,6 +76,10 @@ fn checked_in_icon_has_every_size() {
             .unwrap()
             .to_rgba8();
         assert_eq!(png.dimensions(), (*size, *size));
-        assert_eq!(png.into_raw(), rgba(*size), "regenerate the icon ({size} px)");
+        assert_eq!(
+            png.into_raw(),
+            rgba(*size),
+            "regenerate the icon ({size} px)"
+        );
     }
 }

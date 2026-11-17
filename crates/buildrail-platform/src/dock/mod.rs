@@ -42,9 +42,10 @@
 //! **macOS** – unsupported. There is no public API that reserves a screen
 //! edge (the menu bar and Dock are private to the system), so the UI uses the
 //! floating window, typically with `WindowLevel::AlwaysOnTop` and placed
-//! just above the Dock using `NSScreen.visibleFrame` (which winit does not
-//! expose; [`crate::geometry::float_rect`] with the full bounds is the
-//! fallback).
+//! just above the Dock: [`crate::monitors::main_thread_monitors`] reports
+//! each screen's `NSScreen.visibleFrame` as its work area (winit does not
+//! expose it), and [`crate::geometry::float_rect`] places the window
+//! inside it.
 //!
 //! # Wiring the UI (eframe/winit)
 //!

@@ -20,6 +20,12 @@ webbrowser = { version = "1", features = ["hardened"] }
 [target.'cfg(all(unix, not(any(target_os = "macos", target_os = "ios", target_os = "android"))))'.dependencies]
 x11rb = { version = "0.14", features = ["randr"] }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+# NSScreen.visibleFrame: the floating strip sits above the Dock.
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSEnumerator", "NSGeometry"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSScreen", "objc2-core-foundation"] }
+
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",

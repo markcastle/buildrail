@@ -505,3 +505,68 @@ fn export_and_load_errors_say_what_to_do() {
     click(&mut h, "Export");
     wait_label(&mut h, "could not be saved to");
 }
+
+#[test]
+fn native_dialogs_import_and_export_and_cancelling_does_nothing() {
+    let f = Fixture::with_profile(&[gh("Keevoro", "keevoro")]);
+    let out = f.dir.path().join("picked.toml");
+    // Export: cancel once, then pick a file.
+    f.world.dialogs.answer(None);
+    f.world.dialogs.answer(Some(out.clone()));
+    // Import: pick the file just written.
+    f.world.dialogs.answer(Some(out.clone()));
+    let mut h = f.harness([1000.0, 1000.0]);
+    open_settings(&mut h, "Share");
+    click(&mut h, "Save as…");
+    assert!(!out.exists(), "cancelled");
+    click(&mut h, "Save as…");
+    wait_label(&mut h, "Saved the profile to");
+    assert!(std::fs::read_to_string(&out)
+        .unwrap()
+        .contains("label = \"Keevoro\""));
+    click(&mut h, "Choose file…");
+    step_until(&mut h, "loaded", |h| {
+        h.state().settings().import().text().contains("Keevoro")
+    });
+    assert_eq!(
+        f.world.dialogs.asked(),
+        ["save builds.toml", "save builds.toml", "open"]
+    );
+    // A file that cannot be read says so.
+    f.world
+        .dialogs
+        .answer(Some(f.dir.path().join("missing.toml")));
+    click(&mut h, "Choose file…");
+    wait_label(&mut h, "could not be read");
+}
+
+#[test]
+fn animation_is_off_until_turned_on() {
+    let f = Fixture::with_profile(&[gh("Keevoro", "keevoro")]);
+    let mut h = f.harness([1000.0, 900.0]);
+    open_settings(&mut h, "Strip");
+    assert!(!h.state().controller().prefs().animation);
+    assert!(h
+        .query_by_label_contains("Off, nothing on the strip moves.")
+        .is_some());
+    click(&mut h, "Animation");
+    assert!(f.paths.device_prefs_store().load().unwrap().animation);
+}
+
+#[test]
+fn about_opens_the_log_folder() {
+    let f = Fixture::new();
+    let mut h = settings_only(&f);
+    settle(&mut h);
+    click(&mut h, "About");
+    assert!(h.query_by_label(env!("CARGO_PKG_VERSION")).is_some());
+    // The folder does not exist yet: the error says so.
+    click(&mut h, "Open log folder");
+    wait_label(&mut h, "The log folder could not be opened");
+    std::fs::create_dir_all(f.paths.logs_dir()).unwrap();
+    click(&mut h, "Open log folder");
+    assert_eq!(f.world.folders.opened(), [f.paths.logs_dir().to_owned()]);
+    assert!(h
+        .query_by_label_contains("The log folder could not be opened")
+        .is_none());
+}

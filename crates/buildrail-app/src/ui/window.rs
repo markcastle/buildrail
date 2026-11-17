@@ -14,8 +14,8 @@
 use std::sync::Arc;
 
 use buildrail_platform::dock::{raw_window_handle_of, ReservationGuarantee, WindowRef};
-use buildrail_platform::geometry::{MonitorInfo as PlatformMonitor, PhysicalPosition};
 use buildrail_platform::geometry::STRIP_HEIGHT_LOGICAL;
+use buildrail_platform::geometry::{MonitorInfo as PlatformMonitor, PhysicalPosition};
 use buildrail_profile::Placement;
 use eframe::egui::{self, Pos2, Vec2, ViewportBuilder, ViewportCommand};
 use raw_window_handle::RawWindowHandle;

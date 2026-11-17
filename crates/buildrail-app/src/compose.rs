@@ -30,7 +30,9 @@ use buildrail_platform::dock::platform_dock;
 use buildrail_platform::folders::SystemFolderOpener;
 use buildrail_platform::fullscreen::platform_fullscreen_probe;
 use buildrail_platform::geometry::{MonitorId, MonitorInfo, PhysicalRect};
-use buildrail_platform::monitors::{platform_monitor_source, MonitorSource, StaticMonitors};
+use buildrail_platform::monitors::{
+    main_thread_monitors, platform_monitor_source, MonitorSource, StaticMonitors,
+};
 use buildrail_platform::single_instance::{
     platform_single_instance, InstanceError, SingleInstance,
 };
@@ -42,9 +44,7 @@ use raw_window_handle::RawWindowHandle;
 use thiserror::Error;
 use tokio::runtime::Handle;
 
-use crate::app::{
-    AppController, Catalogs, InstanceLock, Lifecycle, ReleaseOnDrop, Services,
-};
+use crate::app::{AppController, Catalogs, InstanceLock, Lifecycle, ReleaseOnDrop, Services};
 use crate::demo::{demo_connections, demo_profile, DemoRunSource, LoggingUrlOpener};
 use crate::dialogs::RfdFileDialog;
 use crate::fakes::FakeCatalog;
@@ -131,7 +131,9 @@ pub fn parse_args(args: impl IntoIterator<Item = OsString>) -> Result<Options, S
                 options.notes.push(renderer_note(value.as_deref()));
             }
             Some(other) if other.starts_with("--renderer=") => {
-                options.notes.push(renderer_note(other.split_once('=').map(|(_, v)| v)));
+                options
+                    .notes
+                    .push(renderer_note(other.split_once('=').map(|(_, v)| v)));
             }
             _ => return Err(StartError::Usage(arg.to_string_lossy().into_owned())),
         }
@@ -229,10 +231,25 @@ pub fn init_logging(logs_dir: Option<&Path>) {
         .try_init();
 }
 
+/// Sends panics to the log (and so to the log file) before the default
+/// report, so a crash on a machine without a terminal leaves a trace.
+pub fn log_panics() {
+    let default = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        tracing::error!(%info, "BuildRail crashed");
+        default(info);
+    }));
+}
+
 /// The rotating log file in `dir`.
 pub fn log_file(
     dir: &Path,
 ) -> Result<tracing_appender::rolling::RollingFileAppender, tracing_appender::rolling::InitError> {
+    // The appender prunes old files by listing the folder first, and
+    // complains on stderr when there is no folder yet.
+    if let Err(error) = std::fs::create_dir_all(dir) {
+        tracing::debug!(%error, "cannot create the log folder");
+    }
     tracing_appender::rolling::Builder::new()
         .rotation(tracing_appender::rolling::Rotation::DAILY)
         .filename_prefix("buildrail")
@@ -380,8 +397,9 @@ pub fn demo_policy() -> RefreshPolicy {
 }
 
 /// The dock controller for the real window: platform dock and fullscreen
-/// probe; monitors from the OS where available, else from what egui knows
-/// about the window's monitor (Wayland, macOS).
+/// probe; monitors from the OS where available (on macOS read once, here,
+/// on the main thread), else from what egui knows about the window's
+/// monitor (Wayland).
 pub fn platform_shell() -> ShellFactory {
     Box::new(|handle: &RawWindowHandle, ctx: &egui::Context| {
         let (native_ppp, monitor_points) = ctx.input(|i| {
@@ -393,16 +411,22 @@ pub fn platform_shell() -> ShellFactory {
         let monitors: Box<dyn MonitorSource> = match platform_monitor_source(f64::from(native_ppp))
         {
             Some(source) => source,
-            None => {
-                let size = monitor_points.unwrap_or(egui::vec2(1280.0, 800.0)) * native_ppp;
-                let bounds = PhysicalRect::new(0, 0, size.x.round() as u32, size.y.round() as u32);
-                Box::new(StaticMonitors(vec![MonitorInfo::without_work_area(
-                    MonitorId::new("current"),
-                    bounds,
-                    f64::from(native_ppp),
-                    true,
-                )]))
-            }
+            // macOS: the screens with their visible frames (above the Dock,
+            // below the menu bar), read here because this is the main thread.
+            None => match main_thread_monitors().filter(|list| !list.is_empty()) {
+                Some(list) => Box::new(StaticMonitors(list)),
+                None => {
+                    let size = monitor_points.unwrap_or(egui::vec2(1280.0, 800.0)) * native_ppp;
+                    let bounds =
+                        PhysicalRect::new(0, 0, size.x.round() as u32, size.y.round() as u32);
+                    Box::new(StaticMonitors(vec![MonitorInfo::without_work_area(
+                        MonitorId::new("current"),
+                        bounds,
+                        f64::from(native_ppp),
+                        true,
+                    )]))
+                }
+            },
         };
         DockController::new(
             platform_dock(),
@@ -450,6 +474,7 @@ pub fn run(options: &Options) -> Result<(), StartError> {
         None => app_paths(override_dir.clone())?,
     };
     init_logging(Some(paths.logs_dir()));
+    log_panics();
 
     let override_path = override_dir.as_deref().map(Path::new);
     let name = instance_name(options.demo, override_path);
@@ -469,7 +494,10 @@ pub fn run(options: &Options) -> Result<(), StartError> {
     let (services, policy) = if options.demo {
         (demo_services(&paths, runtime.handle())?, demo_policy())
     } else {
-        (production_services(&paths, runtime.handle())?, RefreshPolicy::default())
+        (
+            production_services(&paths, runtime.handle())?,
+            RefreshPolicy::default(),
+        )
     };
     let cache: Arc<dyn SnapshotCache> = Arc::new(paths.snapshot_cache());
     let controller = AppController::start(services, cache, policy, runtime.handle().clone());

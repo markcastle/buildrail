@@ -22,8 +22,7 @@
 use std::time::{Duration, Instant};
 
 use buildrail_platform::dock::{
-    DockError, DockEvent, DockOutcome, EdgeDock, ReservationGuarantee, UnsupportedReason,
-    WindowRef,
+    DockError, DockEvent, DockOutcome, EdgeDock, ReservationGuarantee, UnsupportedReason, WindowRef,
 };
 use buildrail_platform::fullscreen::FullscreenProbe;
 use buildrail_platform::geometry::{
@@ -788,7 +787,9 @@ mod tests {
     #[test]
     fn undockable_windows_float_with_the_reason() {
         let mut f = setup(ScriptedDock::reserving(), two_monitors());
-        let commands = f.shell.start(WindowRef::Wayland, &DevicePrefs::default(), f.t0);
+        let commands = f
+            .shell
+            .start(WindowRef::Wayland, &DevicePrefs::default(), f.t0);
         assert!(matches!(commands.first(), Some(ShellCommand::Place(_))));
         assert_eq!(
             f.shell.mode(),

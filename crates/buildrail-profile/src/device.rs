@@ -297,7 +297,10 @@ ignored = true
         let prefs = DevicePrefs::decode(text).unwrap();
         assert_eq!(prefs.theme, Theme::Light);
         assert!(!prefs.animation, "absent means off");
-        assert!(!DevicePrefs::default().encode().unwrap().contains("animation"));
+        assert!(!DevicePrefs::default()
+            .encode()
+            .unwrap()
+            .contains("animation"));
         assert!(
             DevicePrefs::decode("version = 1\nanimation = true\n")
                 .unwrap()

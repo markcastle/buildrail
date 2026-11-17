@@ -45,6 +45,8 @@ pub mod single_instance;
 pub mod url_opener;
 mod wide;
 
+#[cfg(target_os = "macos")]
+mod macos;
 #[cfg(windows)]
 mod win32;
 #[cfg(x11_platform)]

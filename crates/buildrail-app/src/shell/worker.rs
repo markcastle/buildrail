@@ -379,9 +379,17 @@ mod tests {
     #[test]
     fn starts_docked_and_stays_quiet_while_nothing_changes() {
         let f = start(&DevicePrefs::default());
-        let seen = until(&f, |u| matches!(u, ShellUpdate::Mode(ShellMode::Docked { .. })));
+        let seen = until(&f, |u| {
+            matches!(u, ShellUpdate::Mode(ShellMode::Docked { .. }))
+        });
         assert_eq!(seen[0], ShellUpdate::Commands(vec![ShellCommand::Show]));
         assert!(matches!(&seen[1], ShellUpdate::Monitors(m) if m.len() == 1));
+        // The wake-up follows the updates; wait for it, not just for them.
+        let deadline = Instant::now() + WAIT;
+        while f.notified.load(Ordering::SeqCst) == 0 {
+            assert!(Instant::now() < deadline, "no wake-up for the start");
+            std::thread::sleep(FAST);
+        }
         let after_start = f.notified.load(Ordering::SeqCst);
         assert_eq!(after_start, 1, "one wake-up for the start");
 
@@ -400,6 +408,11 @@ mod tests {
         f.probe.set(FullscreenState::Fullscreen);
         let seen = until(&f, |u| *u == ShellUpdate::Hidden(true));
         assert_eq!(seen[0], ShellUpdate::Commands(vec![ShellCommand::Hide]));
+        let deadline = Instant::now() + WAIT;
+        while f.notified.load(Ordering::SeqCst) == after_start {
+            assert!(Instant::now() < deadline, "no wake-up for Hide");
+            std::thread::sleep(FAST);
+        }
         std::thread::sleep(FAST * 10);
         assert_eq!(f.notified.load(Ordering::SeqCst), after_start + 1);
         f.probe.set(FullscreenState::NotFullscreen);
@@ -438,7 +451,9 @@ mod tests {
         f.worker.native_message(0, 0, 0);
 
         f.worker.apply(&DevicePrefs::default());
-        until(&f, |u| matches!(u, ShellUpdate::Mode(ShellMode::Docked { .. })));
+        until(&f, |u| {
+            matches!(u, ShellUpdate::Mode(ShellMode::Docked { .. }))
+        });
         drop(f.worker);
         assert_eq!(f.dock.calls().last(), Some(&DockCall::Release));
     }
