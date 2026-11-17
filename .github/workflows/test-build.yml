@@ -103,9 +103,10 @@ jobs:
         uses: ssciwr/setup-mesa-dist-win@v3
 
       # Start the demo with its files in a scratch folder, give it ten
-      # seconds to dock, photograph the whole desktop, then ask it to close
-      # (WM_CLOSE, as the taskbar would) so the log also shows the screen
-      # edge being given back.
+      # seconds to dock, read where its window really is (GetWindowRect),
+      # photograph the whole desktop, then ask it to close (WM_CLOSE, as the
+      # taskbar would) so the log also shows the screen edge being given
+      # back.
       - name: Run the demo and take a screenshot
         id: run
         run: |
@@ -118,6 +119,56 @@ jobs:
             -RedirectStandardOutput $out -RedirectStandardError $err
           Start-Sleep -Seconds 10
           $alive = -not $p.HasExited
+
+          Add-Type -TypeDefinition @"
+          using System;
+          using System.Collections.Generic;
+          using System.Runtime.InteropServices;
+          using System.Text;
+          public static class SmokeWindows {
+              [StructLayout(LayoutKind.Sequential)]
+              public struct RECT { public int Left, Top, Right, Bottom; }
+              public delegate bool EnumProc(IntPtr hwnd, IntPtr data);
+              [DllImport("user32.dll")] static extern bool EnumWindows(EnumProc proc, IntPtr data);
+              [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint pid);
+              [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr hwnd);
+              [DllImport("user32.dll")] static extern bool GetWindowRect(IntPtr hwnd, out RECT rect);
+              [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetWindowText(IntPtr hwnd, StringBuilder text, int max);
+              // "title|x|y|width|height" for each visible top-level window of the process.
+              public static List<string> Of(uint pid) {
+                  var found = new List<string>();
+                  EnumWindows(delegate (IntPtr hwnd, IntPtr data) {
+                      uint owner;
+                      GetWindowThreadProcessId(hwnd, out owner);
+                      if (owner == pid && IsWindowVisible(hwnd)) {
+                          RECT r;
+                          GetWindowRect(hwnd, out r);
+                          var title = new StringBuilder(256);
+                          GetWindowText(hwnd, title, 256);
+                          found.Add(String.Format("{0}|{1}|{2}|{3}|{4}", title, r.Left, r.Top, r.Right - r.Left, r.Bottom - r.Top));
+                      }
+                      return true;
+                  }, IntPtr.Zero);
+                  return found;
+              }
+          }
+          "@
+          $strip = $null
+          if ($alive) {
+            foreach ($entry in [SmokeWindows]::Of([uint32]$p.Id)) {
+              $f = $entry.Split('|')
+              Write-Output "Window '$($f[0])': $($f[3])x$($f[4]) at ($($f[1]), $($f[2]))"
+              if ($f[0] -eq 'BuildRail') {
+                $strip = @{ X = [int]$f[1]; Y = [int]$f[2]; W = [int]$f[3]; H = [int]$f[4] }
+              }
+            }
+          }
+          if ($strip) {
+            "window=$($strip.W)x$($strip.H) at ($($strip.X), $($strip.Y))" >> $env:GITHUB_OUTPUT
+          } else {
+            Write-Output "::warning::No visible BuildRail window found"
+          }
+
           try {
             Add-Type -AssemblyName System.Windows.Forms, System.Drawing
             $screen = [System.Windows.Forms.SystemInformation]::VirtualScreen
@@ -125,12 +176,36 @@ jobs:
             $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
             $graphics.CopyFromScreen($screen.Left, $screen.Top, 0, 0, $bitmap.Size)
             $bitmap.Save((Join-Path $env:SMOKE_DIR 'screenshot.png'), [System.Drawing.Imaging.ImageFormat]::Png)
+            Write-Output "Screenshot: $($screen.Width)x$($screen.Height) at ($($screen.Left), $($screen.Top))"
+            # Crude look at the pixels: the strip's middle row against the
+            # row just outside it (above, or below a strip at the top).
+            if ($strip) {
+              $average = {
+                param($y)
+                $r = 0; $g = 0; $b = 0; $n = 0
+                for ($x = $strip.X; $x -lt $strip.X + $strip.W; $x += 8) {
+                  $px = $x - $screen.Left; $py = $y - $screen.Top
+                  if ($px -ge 0 -and $px -lt $bitmap.Width -and $py -ge 0 -and $py -lt $bitmap.Height) {
+                    $c = $bitmap.GetPixel($px, $py); $r += $c.R; $g += $c.G; $b += $c.B; $n++
+                  }
+                }
+                if ($n -eq 0) { return $null }
+                return @([int]($r / $n), [int]($g / $n), [int]($b / $n))
+              }
+              $inside = & $average ($strip.Y + [int]($strip.H / 2))
+              $outsideY = if ($strip.Y -gt $screen.Top) { $strip.Y - 1 } else { $strip.Y + $strip.H }
+              $outside = & $average $outsideY
+              if ($inside -and $outside) {
+                $differ = ($inside -join ',') -ne ($outside -join ',')
+                Write-Output "Strip's middle row averages rgb($($inside -join ', ')); the row at y=$outsideY averages rgb($($outside -join ', ')): $(if ($differ) { 'they differ, so something is drawn there' } else { 'the same' })"
+              }
+            }
             $graphics.Dispose()
             $bitmap.Dispose()
-            Write-Output "Screenshot: $($screen.Width)x$($screen.Height) at ($($screen.Left), $($screen.Top))"
           } catch {
             Write-Output "::warning::No screenshot of the desktop: $_"
           }
+
           if ($alive) {
             taskkill /PID $p.Id | Out-Null
             if (-not $p.WaitForExit(10000)) {
@@ -142,25 +217,59 @@ jobs:
           }
           "alive=$alive" >> $env:GITHUB_OUTPUT
 
+      # Fails when the app died early or panicked, when the log never
+      # confirmed the strip on its reserved edge, or when the last dock
+      # check says it is not there.
       - name: Check the log
+        env:
+          WINDOW_RECT: ${{ steps.run.outputs.window }}
+          ALIVE: ${{ steps.run.outputs.alive }}
         run: |
           $logs = Get-ChildItem -Path (Join-Path $env:SMOKE_DIR 'logs') -Filter '*.log' -ErrorAction SilentlyContinue
           if (-not $logs) { Write-Output "::warning::BuildRail wrote no log file" }
-          $files = @($logs | ForEach-Object { $_.FullName }) + @(
-            (Join-Path $env:SMOKE_DIR 'stdout.txt'),
-            (Join-Path $env:SMOKE_DIR 'stderr.txt')
-          ) | Where-Object { Test-Path $_ }
-          foreach ($file in $files) {
-            Write-Output "===== $file"
-            Get-Content $file
+          foreach ($file in $logs) {
+            Write-Output "===== $($file.FullName)"
+            Get-Content $file.FullName
           }
-          $text = ($files | ForEach-Object { Get-Content $_ -Raw }) -join "`n"
+          $log = ($logs | ForEach-Object { Get-Content $_.FullName -Raw }) -join "`n"
+          # stdout and stderr repeat the log (the app logs to both); show
+          # only what the log may not have, such as a panic report.
+          $streams = @('stdout.txt', 'stderr.txt') | ForEach-Object { Join-Path $env:SMOKE_DIR $_ } | Where-Object { Test-Path $_ }
+          $streamText = ($streams | ForEach-Object { Get-Content $_ -Raw }) -join "`n"
+          foreach ($file in $streams) {
+            $lines = @(Get-Content $file)
+            Write-Output "===== $file ($($lines.Count) lines, the same as the log; only panics and errors shown)"
+            $lines | Where-Object { $_ -match 'panicked|ERROR|error:' }
+          }
+          if (-not $logs) { $log = $streamText }
+
           $failed = $false
-          if ($text -match 'panicked at|BuildRail crashed') {
+          if (($log + "`n" + $streamText) -match 'panicked at|BuildRail crashed') {
             Write-Output "::error::BuildRail panicked during the smoke run (see the log above)"
             $failed = $true
           }
-          if ('${{ steps.run.outputs.alive }}' -ne 'True') { $failed = $true }
+          if ($env:ALIVE -ne 'True') { $failed = $true }
+
+          $reserved = [regex]::Matches($log, 'reserved=(\d+x\d+ at \(-?\d+, -?\d+\))') | Select-Object -Last 1
+          $reservedRect = if ($reserved) { $reserved.Groups[1].Value } else { 'none in the log' }
+          $windowRect = if ($env:WINDOW_RECT) { $env:WINDOW_RECT } else { 'not found' }
+          Write-Output "Reserved rect (last in the log): $reservedRect"
+          Write-Output "Window rect (GetWindowRect):     $windowRect"
+          if ($reserved -and $env:WINDOW_RECT -and $reservedRect -ne $windowRect) {
+            Write-Output "::warning::The strip's window ($windowRect) is not on the reserved rect ($reservedRect)"
+          }
+          if ($log -notmatch 'the strip is on its reserved edge') {
+            Write-Output "::error::The log never confirms the strip on its reserved edge"
+            $failed = $true
+          }
+          $last = [regex]::Matches($log, '(?m)^.*(the strip is on its reserved edge|the strip is not on its reserved edge yet|dock checked).*$') | Select-Object -Last 1
+          if ($last) {
+            Write-Output "Last dock check: $($last.Value)"
+            if ($last.Value -match 'not on its reserved edge yet|on_rect=false') {
+              Write-Output "::error::The last dock check says the strip is not on its reserved edge"
+              $failed = $true
+            }
+          }
           if ($failed) { exit 1 }
 
       - uses: actions/upload-artifact@v7

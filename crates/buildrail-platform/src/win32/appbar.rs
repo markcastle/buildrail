@@ -20,10 +20,6 @@ use crate::wide::to_wide;
 
 const CALLBACK_NAME: &str = "BuildRail.AppBarNotify";
 
-/// How long [`Win32Window::pause`] lets the window's thread catch up
-/// with a posted move.
-const PAUSE: std::time::Duration = std::time::Duration::from_millis(40);
-
 /// The registered callback message id (same value in every thread and
 /// process for the same name).
 pub(crate) fn callback_message() -> Option<u32> {
@@ -198,10 +194,6 @@ impl AppBarWindow for Win32Window {
             &PhysicalRect::default(),
             SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS,
         )
-    }
-
-    fn pause(&mut self) {
-        std::thread::sleep(PAUSE);
     }
 }
 

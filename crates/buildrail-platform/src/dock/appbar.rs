@@ -20,13 +20,20 @@
 //!    ([`after_query`]: the bottom edge stays and the top is our height
 //!    above it, or the other way round at the top) and send `ABM_SETPOS`;
 //!    the shell reserves that area, so maximised windows stay clear of it.
-//! 4. We move our window there, read back where it really is, and move it
-//!    again until it is exactly on the reserved rect ([`settle_window`]).
-//!    The window's real rect is part of the invariant: anything that moves
-//!    or resizes the window afterwards (winit keeping its logical size when
-//!    it lands on a monitor with another scale, a toolkit's own start-up
-//!    sizing) is undone on the next check, whether or not the reservation
-//!    itself changed. After a move we send `ABM_WINDOWPOSCHANGED`.
+//! 4. We ask for our window to be moved there. The move is posted to the
+//!    window's own thread, so it lands *after* the call returns: a check
+//!    never reads the window back straight after asking, and never asks
+//!    twice. The window's real rect is part of the invariant: every check
+//!    reads it ([`WindowFollow`]), confirms (once, at info level) when it is
+//!    on the reserved rect, and otherwise asks again. Anything that moves or
+//!    resizes the window afterwards (winit keeping its logical size when it
+//!    lands on a monitor with another scale, a toolkit's own start-up
+//!    sizing) is therefore undone by the next check, whether or not the
+//!    reservation itself changed. Requests are bounded across checks
+//!    ([`MAX_MOVE_REQUESTS`], then one every [`RETRY_EVERY`] checks), so a
+//!    window that never arrives is reported and retried slowly, never
+//!    spun on. Once the window is confirmed after a move we send
+//!    `ABM_WINDOWPOSCHANGED`.
 //! 5. The shell sends our callback message with `wParam` set to one of the
 //!    `ABN_*` codes ([`decode_notification`]) when the taskbar moves, a
 //!    fullscreen app opens or closes, and so on.
@@ -55,11 +62,17 @@ pub const ABN_FULLSCREENAPP: usize = 2;
 /// (`lParam != 0` before, `0` after).
 pub const ABN_WINDOWARRANGE: usize = 3;
 
-/// How many times one check moves the window before giving up until the
-/// next check. Two are needed when the window lands on a monitor with
-/// another scale (the first move changes its DPI and the toolkit resizes
-/// it; the second puts it back); the third is slack.
-pub const SETTLE_ATTEMPTS: u32 = 3;
+/// How many checks in a row may ask for the window to be moved before the
+/// dock reports that it is not arriving. Two are needed when the window
+/// lands on a monitor with another scale (the first move changes its DPI
+/// and the toolkit resizes it; the second puts it back); the third is
+/// slack.
+pub const MAX_MOVE_REQUESTS: u32 = 3;
+
+/// After [`MAX_MOVE_REQUESTS`] unanswered requests, ask (and report)
+/// again only every this many checks (about half a minute at the
+/// controller's interval).
+pub const RETRY_EVERY: u32 = 10;
 
 /// A decoded AppBar callback notification.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -198,62 +211,95 @@ pub trait AppBarWindow: Send {
     /// Where the window really is now (outer rect, physical pixels), or
     /// `None` when it cannot be read (the window is gone).
     fn rect(&self, window: isize) -> Option<PhysicalRect>;
-    /// Moves and sizes the window to `rect`, topmost, without activating
-    /// it. May complete asynchronously (on the window's own thread).
+    /// Asks for the window to be moved and sized to `rect`, topmost,
+    /// without activating it. The move happens on the window's own thread,
+    /// after this returns: read the rect at the next check, not now.
     fn place(&mut self, window: isize, rect: &PhysicalRect) -> Result<(), DockError>;
     /// Changes only the z-order: topmost, or behind everything (while a
     /// fullscreen app is open).
     fn set_topmost(&mut self, window: isize, topmost: bool) -> Result<(), DockError>;
-    /// Gives the window's own thread a moment to act on [`place`]
-    /// (production: a short sleep; tests: process the queued moves).
-    ///
-    /// [`place`]: AppBarWindow::place
-    fn pause(&mut self);
 }
 
-/// What [`settle_window`] did.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Settled {
-    /// The window's rect before.
-    pub before: Option<PhysicalRect>,
-    /// The window's rect after.
-    pub after: Option<PhysicalRect>,
-    /// How many times it was moved.
-    pub moves: u32,
+/// What one check decided about the window (see [`WindowFollow`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct FollowStep {
+    /// Ask for the window to be moved to the reserved rect.
+    pub request_move: bool,
+    /// The window was just seen on the reserved rect for the first time
+    /// since the reservation changed or the window was moved: say so once.
+    pub confirmed: bool,
+    /// The window still has not arrived after [`MAX_MOVE_REQUESTS`]
+    /// requests: report it (rate-limited).
+    pub not_arriving: bool,
 }
 
-impl Settled {
-    /// `true` when the window ended exactly on the wanted rect.
-    pub fn on(&self, wanted: &PhysicalRect) -> bool {
-        self.after == Some(*wanted)
+/// Keeps the window on the reserved rect across checks, with moves that
+/// land asynchronously. Pure: it is told where the window is and decides.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct WindowFollow {
+    /// The window has been seen on the current reserved rect.
+    confirmed: bool,
+    /// Moves asked for since the window was last confirmed.
+    requests: u32,
+    /// Checks since the window was last confirmed.
+    misses: u32,
+}
+
+impl WindowFollow {
+    /// A window not yet seen anywhere.
+    pub fn new() -> Self {
+        Self::default()
     }
-}
 
-/// Moves `window` to `wanted` until it is really there, at most `attempts`
-/// times, reading its rect back after each move. Never moves a window that
-/// is already in place, so repeated calls do not fight anything: they
-/// converge in one call (two moves when the first one changes the window's
-/// scale and the toolkit resizes it) and then do nothing.
-pub fn settle_window<W: AppBarWindow + ?Sized>(
-    window: &mut W,
-    handle: isize,
-    wanted: &PhysicalRect,
-    attempts: u32,
-) -> Result<Settled, DockError> {
-    let before = window.rect(handle);
-    let mut after = before;
-    let mut moves = 0;
-    while after != Some(*wanted) && moves < attempts {
-        window.place(handle, wanted)?;
-        moves += 1;
-        window.pause();
-        after = window.rect(handle);
+    /// The reservation moved: the window must be confirmed afresh.
+    pub fn reservation_changed(&mut self) {
+        *self = Self::default();
     }
-    Ok(Settled {
-        before,
-        after,
-        moves,
-    })
+
+    /// `true` when the window has been seen on the current rect.
+    pub fn is_confirmed(&self) -> bool {
+        self.confirmed
+    }
+
+    /// Moves asked for since the window was last confirmed.
+    pub fn requests(&self) -> u32 {
+        self.requests
+    }
+
+    /// One check: the window is `on_rect` or not.
+    pub fn check(&mut self, on_rect: bool) -> FollowStep {
+        if on_rect {
+            let confirmed = !self.confirmed;
+            *self = Self {
+                confirmed: true,
+                requests: 0,
+                misses: 0,
+            };
+            return FollowStep {
+                confirmed,
+                ..FollowStep::default()
+            };
+        }
+        self.confirmed = false;
+        self.misses += 1;
+        let request_move = if self.requests < MAX_MOVE_REQUESTS {
+            true
+        } else {
+            (self.misses - MAX_MOVE_REQUESTS).is_multiple_of(RETRY_EVERY)
+        };
+        // Reported when the bound is first passed, then with each slow
+        // retry.
+        let not_arriving = (self.requests >= MAX_MOVE_REQUESTS && request_move)
+            || self.misses == MAX_MOVE_REQUESTS + 1;
+        if request_move {
+            self.requests += 1;
+        }
+        FollowStep {
+            request_move,
+            confirmed: false,
+            not_arriving,
+        }
+    }
 }
 
 fn show(rect: Option<PhysicalRect>) -> String {
@@ -277,9 +323,11 @@ pub struct AppBar<S: AppBarShell, W: AppBarWindow> {
     request: Option<Request>,
     /// The edge and rect the shell reserved for us.
     reserved: Option<(Edge, PhysicalRect)>,
-    /// The window could not be put on the reserved rect at the last check
-    /// (logged once, then quietly retried).
-    stuck: bool,
+    /// Whether the window is on the reserved rect, across checks.
+    follow: WindowFollow,
+    /// A move was asked for since the window was last confirmed (so the
+    /// shell hears `ABM_WINDOWPOSCHANGED` when it arrives).
+    moved: bool,
 }
 
 impl<S: AppBarShell, W: AppBarWindow> AppBar<S, W> {
@@ -292,7 +340,8 @@ impl<S: AppBarShell, W: AppBarWindow> AppBar<S, W> {
             hwnd: None,
             request: None,
             reserved: None,
-            stuck: false,
+            follow: WindowFollow::new(),
+            moved: false,
         }
     }
 
@@ -341,22 +390,32 @@ impl<S: AppBarShell, W: AppBarWindow> AppBar<S, W> {
         } else {
             wanted
         };
-        let settled = settle_window(&mut self.window, hwnd, &rect, SETTLE_ATTEMPTS)?;
-        if settled.moves > 0 {
-            self.shell.window_pos_changed(hwnd);
+        if reservation_changed {
+            self.follow.reservation_changed();
         }
-        let on_rect = settled.on(&rect);
-        let operation = if force {
-            "reserved the screen edge"
-        } else if reservation_changed {
-            "moved the reserved screen edge"
-        } else if settled.moves > 0 {
-            "put the strip back on its reserved edge"
+        let window_now = self.window.rect(hwnd);
+        let step = self.follow.check(window_now == Some(rect));
+        if step.request_move {
+            self.window.place(hwnd, &rect)?;
+            self.moved = true;
+        }
+        let move_state = if step.request_move {
+            "requested"
+        } else if window_now == Some(rect) {
+            "not needed"
         } else {
-            ""
+            "held back"
         };
-        let first_miss = !on_rect && !self.stuck;
-        if !operation.is_empty() || first_miss {
+        let operation = if force {
+            Some("reserved the screen edge")
+        } else if reservation_changed {
+            Some("moved the reserved screen edge")
+        } else if step.request_move && self.follow.requests() == 1 {
+            Some("asked for the strip to go back to its reserved edge")
+        } else {
+            None
+        };
+        if let Some(operation) = operation {
             tracing::info!(
                 edge = %edge,
                 monitor = %monitor.id,
@@ -365,21 +424,40 @@ impl<S: AppBarShell, W: AppBarWindow> AppBar<S, W> {
                 proposed = %proposed,
                 queried = %queried,
                 reserved = %rect,
-                window_before = %show(settled.before),
-                window_after = %show(settled.after),
-                moves = settled.moves,
-                on_rect,
-                "{}",
-                if operation.is_empty() {
-                    "the strip is not on its reserved edge yet; will try again"
-                } else {
-                    operation
-                }
+                window_before = %show(window_now),
+                target = %rect,
+                window_move = move_state,
+                "{operation}"
             );
-        } else {
-            tracing::debug!(edge = %edge, reserved = %rect, on_rect, "dock checked");
         }
-        self.stuck = !on_rect;
+        if step.confirmed {
+            if std::mem::take(&mut self.moved) {
+                self.shell.window_pos_changed(hwnd);
+            }
+            tracing::info!(
+                window = %rect,
+                edge = %edge,
+                monitor = %monitor.id,
+                "the strip is on its reserved edge"
+            );
+        } else if step.not_arriving {
+            tracing::warn!(
+                window = %show(window_now),
+                reserved = %rect,
+                requests = self.follow.requests(),
+                window_move = move_state,
+                "the strip is not on its reserved edge yet; will try again"
+            );
+        } else if operation.is_none() {
+            tracing::debug!(
+                edge = %edge,
+                reserved = %rect,
+                window = %show(window_now),
+                on_rect = self.follow.is_confirmed(),
+                window_move = move_state,
+                "dock checked"
+            );
+        }
         Ok(DockOutcome::Reserved {
             rect,
             guarantee: ReservationGuarantee::Enforced,
@@ -444,7 +522,8 @@ impl<S: AppBarShell, W: AppBarWindow> EdgeDock for AppBar<S, W> {
         }
         self.reserved = None;
         self.request = None;
-        self.stuck = false;
+        self.follow = WindowFollow::new();
+        self.moved = false;
         Ok(())
     }
 
@@ -782,10 +861,11 @@ mod tests {
 
     // ---- A model of a winit window -------------------------------------
 
-    /// A per-monitor-DPI-aware window as winit runs it: `place` is posted to
-    /// the window's thread (`SetWindowPos` with `SWP_ASYNCWINDOWPOS`) and
-    /// happens when that thread runs (`pause`, unless `busy`); when a move
-    /// lands on a monitor with another scale, winit answers
+    /// A per-monitor-DPI-aware window as winit runs it on Windows: `place`
+    /// is posted to the window's thread (`SetWindowPos` with
+    /// `SWP_ASYNCWINDOWPOS`) and only happens when that thread runs, which
+    /// is after the dock's call has returned ([`pump`], unless `busy`).
+    /// When a move lands on a monitor with another scale, winit answers
     /// `WM_DPICHANGED` by resizing the window to keep its *logical* size.
     #[derive(Debug)]
     struct Winit {
@@ -816,7 +896,11 @@ mod tests {
                 .map_or(1.0, |m| m.scale_factor)
         }
 
+        /// The window's thread handles the moves posted to it.
         fn run_thread(&mut self) {
+            if self.busy {
+                return;
+            }
             while let Some(target) = self.pending.pop_front() {
                 let old = self.scale_at(&self.rect);
                 let new = self.scale_at(&target);
@@ -843,25 +927,27 @@ mod tests {
             self.topmost = topmost;
             Ok(())
         }
-        fn pause(&mut self) {
-            if !self.busy {
-                self.run_thread();
-            }
-        }
     }
 
     const HWND: isize = 0x1234;
+
+    type Dock = AppBar<Explorer, Winit>;
 
     fn handle(hwnd: isize) -> RawWindowHandle {
         RawWindowHandle::Win32(Win32WindowHandle::new(NonZeroIsize::new(hwnd).unwrap()))
     }
 
-    fn appbar(monitors: &[MonitorInfo]) -> AppBar<Explorer, Winit> {
+    fn appbar(monitors: &[MonitorInfo]) -> Dock {
         // winit created the window on the primary, at its own default size.
         AppBar::with_ports(
             Explorer::with_taskbars(monitors),
             Winit::new(monitors, PhysicalRect::new(200, 200, 760, 24)),
         )
+    }
+
+    /// Time passes between the dock's calls: the window's thread runs.
+    fn pump(bar: &mut Dock) {
+        bar.window_port_mut().run_thread();
     }
 
     fn reserved_rect(outcome: Result<DockOutcome, DockError>) -> PhysicalRect {
@@ -874,18 +960,56 @@ mod tests {
         }
     }
 
+    /// A periodic (or UI-triggered) check, then the window's thread runs.
+    fn check(bar: &mut Dock, monitor: &MonitorInfo, edge: Edge) -> PhysicalRect {
+        let rect = reserved_rect(bar.update(monitor, edge, 24));
+        pump(bar);
+        rect
+    }
+
+    /// Reserves, lets the window's thread run, and checks until the window
+    /// is confirmed on the rect, which must take at most `checks` checks.
+    fn reserve_and_settle(
+        bar: &mut Dock,
+        monitor: &MonitorInfo,
+        edge: Edge,
+        checks: u32,
+    ) -> PhysicalRect {
+        let rect = reserved_rect(bar.reserve(handle(HWND), monitor, edge, 24));
+        pump(bar);
+        for _ in 0..checks {
+            check(bar, monitor, edge);
+            if bar.follow.is_confirmed() {
+                return rect;
+            }
+        }
+        panic!(
+            "not confirmed within {checks} checks: window {} reserved {rect}",
+            bar.window_port().rect
+        );
+    }
+
     #[test]
-    fn reserves_above_the_taskbar_and_shrinks_the_work_area() {
+    fn reserves_above_the_taskbar_and_confirms_the_window_at_the_next_check() {
         let mut bar = appbar(&[a()]);
         let rect = reserved_rect(bar.reserve(handle(HWND), &a(), Edge::Bottom, 24));
         assert_eq!(rect, PhysicalRect::new(0, 1016, 1920, 24));
-        assert_eq!(bar.window_port().rect, rect, "the window is on the rect");
+        // The move was only requested: it lands after the call returns.
+        assert_eq!(bar.window_port().rect, PhysicalRect::new(200, 200, 760, 24));
+        assert_eq!(bar.window_port().places, 1);
+        assert!(!bar.follow.is_confirmed());
+        assert_eq!(bar.shell().pos_changed, 0, "not moved yet");
+        pump(&mut bar);
+        assert_eq!(bar.window_port().rect, rect);
+        check(&mut bar, &a(), Edge::Bottom);
+        assert!(bar.follow.is_confirmed());
+        assert_eq!(bar.window_port().places, 1, "asked once, never repeated");
+        assert_eq!(bar.shell().pos_changed, 1, "told once it arrived");
         assert_eq!(
             bar.shell().work_area(&a()),
             PhysicalRect::new(0, 0, 1920, 1016)
         );
         assert_eq!(bar.shell().activated, 1);
-        assert_eq!(bar.shell().pos_changed, 1);
         assert_eq!(bar.window(), Some(HWND));
         assert_eq!(bar.reserved(), Some((Edge::Bottom, rect)));
         // The same answer as the platform-neutral maths gives for the work
@@ -898,20 +1022,33 @@ mod tests {
     /// The owner's first report: moved to another screen with another
     /// scale, the strip sat away from the taskbar. The window followed our
     /// SetWindowPos, then winit resized it for the new DPI, and nothing ever
-    /// put it back because the reservation itself had not changed.
+    /// put it back because the reservation itself had not changed. Now the
+    /// next check sees the resized window and asks again; the one after
+    /// confirms it, and nothing moves after that.
     #[test]
-    fn moving_to_a_monitor_with_another_scale_ends_exactly_on_the_reserved_rect() {
+    fn moving_to_a_monitor_with_another_scale_converges_within_two_checks_and_stays() {
         let monitors = [a(), b()];
         let mut bar = appbar(&monitors);
-        bar.reserve(handle(HWND), &a(), Edge::Bottom, 24).unwrap();
+        reserve_and_settle(&mut bar, &a(), Edge::Bottom, 1);
         let rect = reserved_rect(bar.reserve(handle(HWND), &b(), Edge::Bottom, 24));
         // B: 2160 tall, 80 px taskbar, 48 px strip.
         assert_eq!(rect, PhysicalRect::new(1920, 2032, 3840, 48));
+        pump(&mut bar);
         assert_eq!(
             bar.window_port().rect,
-            rect,
-            "not twice as tall after the DPI change"
+            PhysicalRect::new(1920, 2032, 7680, 96),
+            "winit kept the logical size: twice as big"
         );
+        check(&mut bar, &b(), Edge::Bottom);
+        assert_eq!(bar.window_port().rect, rect, "corrected by the first check");
+        check(&mut bar, &b(), Edge::Bottom);
+        assert!(bar.follow.is_confirmed(), "confirmed by the second");
+        let places = bar.window_port().places;
+        for _ in 0..5 {
+            check(&mut bar, &b(), Edge::Bottom);
+        }
+        assert_eq!(bar.window_port().rect, rect);
+        assert_eq!(bar.window_port().places, places, "and stays");
         // One appbar, moved; A's work area is whole again.
         assert_eq!(bar.shell().registered, vec![HWND]);
         assert_eq!(bar.shell().ours().len(), 1);
@@ -924,7 +1061,7 @@ mod tests {
             PhysicalRect::new(1920, 0, 3840, 2032)
         );
         // And back to A, from 200 % to 100 %.
-        let rect = reserved_rect(bar.reserve(handle(HWND), &a(), Edge::Bottom, 24));
+        let rect = reserve_and_settle(&mut bar, &a(), Edge::Bottom, 2);
         assert_eq!(bar.window_port().rect, rect);
         assert_eq!(rect, PhysicalRect::new(0, 1016, 1920, 24));
     }
@@ -933,19 +1070,19 @@ mod tests {
     fn negative_origin_monitor_at_150_percent() {
         let monitors = [a(), c()];
         let mut bar = appbar(&monitors);
-        let rect = reserved_rect(bar.reserve(handle(HWND), &c(), Edge::Bottom, 24));
+        let rect = reserve_and_settle(&mut bar, &c(), Edge::Bottom, 2);
         // C's taskbar is 60 px (40 at 150 %); the strip 36.
         assert_eq!(rect, PhysicalRect::new(-2560, 1080 - 60 - 36, 2560, 36));
         assert_eq!(bar.window_port().rect, rect);
     }
 
     /// Whatever moves the window after we placed it (winit's start-up
-    /// sizing, a DPI change, a viewport command), the next check puts it
-    /// back even though the reservation is unchanged.
+    /// sizing, a DPI change, a viewport command), the next check asks for
+    /// it to go back even though the reservation is unchanged.
     #[test]
-    fn a_window_that_drifted_is_put_back_by_the_next_update() {
+    fn a_window_that_drifted_is_put_back_by_the_next_checks() {
         let mut bar = appbar(&[a()]);
-        let rect = reserved_rect(bar.reserve(handle(HWND), &a(), Edge::Bottom, 24));
+        let rect = reserve_and_settle(&mut bar, &a(), Edge::Bottom, 1);
         let set_pos = bar.shell().set_pos_calls;
         bar.window_port_mut().rect = PhysicalRect::new(400, 300, 760, 24);
         assert_eq!(
@@ -953,42 +1090,98 @@ mod tests {
             rect,
             "same reservation"
         );
+        assert!(!bar.follow.is_confirmed());
+        assert_eq!(
+            bar.window_port().rect,
+            PhysicalRect::new(400, 300, 760, 24),
+            "not read back in the same call"
+        );
+        pump(&mut bar);
         assert_eq!(bar.window_port().rect, rect, "window back on it");
+        check(&mut bar, &a(), Edge::Bottom);
+        assert!(bar.follow.is_confirmed());
         assert_eq!(bar.shell().set_pos_calls, set_pos, "no new ABM_SETPOS");
         // Grown by a stray resize (one strip taller): shrunk back.
         bar.window_port_mut().rect = PhysicalRect::new(0, 1016, 1920, 48);
-        bar.update(&a(), Edge::Bottom, 24).unwrap();
+        check(&mut bar, &a(), Edge::Bottom);
         assert_eq!(bar.window_port().rect, rect);
     }
 
     #[test]
-    fn repeated_updates_neither_creep_nor_move_anything() {
+    fn repeated_checks_neither_creep_nor_move_anything() {
         let mut bar = appbar(&[a()]);
-        let rect = reserved_rect(bar.reserve(handle(HWND), &a(), Edge::Bottom, 24));
+        let rect = reserve_and_settle(&mut bar, &a(), Edge::Bottom, 1);
         let places = bar.window_port().places;
         for _ in 0..10 {
-            assert_eq!(reserved_rect(bar.update(&a(), Edge::Bottom, 24)), rect);
+            assert_eq!(check(&mut bar, &a(), Edge::Bottom), rect);
         }
         assert_eq!(bar.shell().set_pos_calls, 1);
         assert_eq!(bar.window_port().places, places, "no oscillation");
     }
 
-    /// While the window's thread is busy (start-up), a check cannot finish
-    /// the move; the next one does, and after that nothing moves.
+    /// A window that never arrives (its thread busy, or something fighting
+    /// it) is asked a bounded number of times, then only every
+    /// RETRY_EVERY checks; it is never spun on. When the thread runs again,
+    /// the window lands and is confirmed.
     #[test]
-    fn a_busy_window_thread_converges_on_the_next_check_and_then_stays() {
+    fn a_window_that_does_not_arrive_is_retried_slowly_and_converges_later() {
         let monitors = [a(), b()];
         let mut bar = appbar(&monitors);
         bar.window_port_mut().busy = true;
         let rect = reserved_rect(bar.reserve(handle(HWND), &b(), Edge::Bottom, 24));
-        assert_ne!(bar.window_port().rect, rect);
+        for _ in 0..(MAX_MOVE_REQUESTS + RETRY_EVERY - 1) {
+            check(&mut bar, &b(), Edge::Bottom);
+        }
+        assert_eq!(bar.window_port().places, MAX_MOVE_REQUESTS + 1);
+        assert_eq!(
+            bar.window_port().pending.len() as u32,
+            MAX_MOVE_REQUESTS + 1
+        );
         bar.window_port_mut().busy = false;
-        // The queued moves run now; the first lands with the wrong size.
-        bar.update(&b(), Edge::Bottom, 24).unwrap();
+        pump(&mut bar);
+        for _ in 0..2 {
+            check(&mut bar, &b(), Edge::Bottom);
+        }
+        assert!(bar.follow.is_confirmed());
         assert_eq!(bar.window_port().rect, rect);
-        let places = bar.window_port().places;
-        bar.update(&b(), Edge::Bottom, 24).unwrap();
-        assert_eq!(bar.window_port().places, places);
+    }
+
+    #[test]
+    fn follow_bounds_requests_and_rate_limits_reports() {
+        let mut follow = WindowFollow::new();
+        let mut steps = Vec::new();
+        for _ in 0..(MAX_MOVE_REQUESTS + 2 * RETRY_EVERY) {
+            steps.push(follow.check(false));
+        }
+        let requested: Vec<usize> = steps
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| s.request_move)
+            .map(|(i, _)| i + 1)
+            .collect();
+        assert_eq!(requested, vec![1, 2, 3, 13, 23]);
+        let reported: Vec<usize> = steps
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| s.not_arriving)
+            .map(|(i, _)| i + 1)
+            .collect();
+        assert_eq!(reported, vec![4, 13, 23]);
+        assert!(steps.iter().all(|s| !s.confirmed));
+        assert_eq!(
+            follow.check(true),
+            FollowStep {
+                confirmed: true,
+                ..FollowStep::default()
+            }
+        );
+        assert_eq!(follow.check(true), FollowStep::default(), "confirmed once");
+        assert_eq!(follow.requests(), 0);
+        follow.reservation_changed();
+        assert!(
+            follow.check(true).confirmed,
+            "confirmed afresh after a change"
+        );
     }
 
     #[test]
@@ -1004,7 +1197,7 @@ mod tests {
             explorer,
             Winit::new(&[a()], PhysicalRect::new(0, 0, 10, 10)),
         );
-        let rect = reserved_rect(bar.reserve(handle(HWND), &a(), Edge::Bottom, 24));
+        let rect = reserve_and_settle(&mut bar, &a(), Edge::Bottom, 1);
         assert_eq!(rect, PhysicalRect::new(200, 1016, 1720, 24));
         assert_eq!(bar.window_port().rect, rect);
 
@@ -1015,7 +1208,7 @@ mod tests {
             side: Side::Right,
             rect: PhysicalRect::new(1720, 0, 200, 1040),
         });
-        let rect = reserved_rect(bar.update(&a(), Edge::Top, 24));
+        let rect = check(&mut bar, &a(), Edge::Top);
         assert_eq!(rect, PhysicalRect::new(0, 0, 1720, 24));
         assert_eq!(bar.window_port().rect, rect);
     }
@@ -1032,17 +1225,20 @@ mod tests {
             explorer,
             Winit::new(&[a()], PhysicalRect::new(0, 0, 10, 10)),
         );
-        let rect = reserved_rect(bar.reserve(handle(HWND), &a(), Edge::Bottom, 24));
+        let rect = reserve_and_settle(&mut bar, &a(), Edge::Bottom, 1);
         assert_eq!(rect, PhysicalRect::new(0, 976, 1920, 24));
     }
 
     #[test]
     fn top_edge_and_switching_edges_moves_the_one_reservation() {
         let mut bar = appbar(&[a()]);
-        bar.reserve(handle(HWND), &a(), Edge::Bottom, 24).unwrap();
-        let rect = reserved_rect(bar.update(&a(), Edge::Top, 24));
+        reserve_and_settle(&mut bar, &a(), Edge::Bottom, 1);
+        let rect = check(&mut bar, &a(), Edge::Top);
         assert_eq!(rect, PhysicalRect::new(0, 0, 1920, 24));
+        assert!(!bar.follow.is_confirmed(), "a new rect is confirmed afresh");
         assert_eq!(bar.window_port().rect, rect);
+        check(&mut bar, &a(), Edge::Top);
+        assert!(bar.follow.is_confirmed());
         assert_eq!(bar.shell().ours().len(), 1);
         assert_eq!(
             bar.shell().work_area(&a()),
@@ -1064,14 +1260,14 @@ mod tests {
             explorer,
             Winit::new(&[a()], PhysicalRect::new(0, 0, 10, 10)),
         );
-        let rect = reserved_rect(bar.reserve(handle(HWND), &a(), Edge::Top, 24));
+        let rect = reserve_and_settle(&mut bar, &a(), Edge::Top, 1);
         assert_eq!(rect, PhysicalRect::new(0, 48, 1920, 24));
     }
 
     #[test]
     fn release_and_drop_give_the_space_back_with_the_registering_window() {
         let mut bar = appbar(&[a()]);
-        bar.reserve(handle(HWND), &a(), Edge::Bottom, 24).unwrap();
+        reserve_and_settle(&mut bar, &a(), Edge::Bottom, 1);
         bar.release().unwrap();
         assert_eq!(bar.shell().removed, vec![HWND]);
         assert!(bar.shell().ours().is_empty());
@@ -1080,6 +1276,7 @@ mod tests {
             PhysicalRect::new(0, 0, 1920, 1040)
         );
         assert_eq!(bar.reserved(), None);
+        assert!(!bar.follow.is_confirmed());
         bar.release().unwrap();
         assert_eq!(bar.shell().removed.len(), 1, "only once");
         assert_eq!(
@@ -1115,13 +1312,14 @@ mod tests {
             Err(DockError::Win32 { .. })
         ));
         assert_eq!(bar.window(), None);
+        assert_eq!(show(None), "unknown");
     }
 
     #[test]
     fn notifications_reposition_and_follow_fullscreen_apps() {
         let mut bar = appbar(&[a()]);
         assert_eq!(bar.handle_native_message(0xC123, ABN_POSCHANGED, 0), None);
-        let rect = reserved_rect(bar.reserve(handle(HWND), &a(), Edge::Bottom, 24));
+        let rect = reserve_and_settle(&mut bar, &a(), Edge::Bottom, 1);
         assert_eq!(bar.handle_native_message(0x0001, ABN_POSCHANGED, 0), None);
         // The taskbar grew: the strip moves up with it.
         bar.shell.bars[0].rect = PhysicalRect::new(0, 1000, 1920, 80);
@@ -1131,7 +1329,9 @@ mod tests {
                 rect: PhysicalRect::new(0, 976, 1920, 24)
             })
         );
-        assert_ne!(bar.window_port().rect, rect);
+        assert_eq!(bar.window_port().rect, rect, "requested, not yet moved");
+        pump(&mut bar);
+        assert_eq!(bar.window_port().rect, PhysicalRect::new(0, 976, 1920, 24));
         assert_eq!(
             bar.handle_native_message(0xC123, ABN_FULLSCREENAPP, 1),
             Some(DockEvent::FullscreenEntered)
@@ -1147,25 +1347,5 @@ mod tests {
             None
         );
         assert_eq!(bar.handle_native_message(0xC123, 42, 0), None);
-    }
-
-    /// A window that never gets where it is sent (another program fighting
-    /// it) is moved a bounded number of times per check, and the failure is
-    /// reported rather than looped on.
-    #[test]
-    fn settling_is_bounded() {
-        let mut window = Winit::new(&[a()], PhysicalRect::new(0, 0, 10, 10));
-        window.busy = true;
-        let wanted = PhysicalRect::new(0, 1016, 1920, 24);
-        let settled = settle_window(&mut window, HWND, &wanted, SETTLE_ATTEMPTS).unwrap();
-        assert_eq!(settled.moves, SETTLE_ATTEMPTS);
-        assert!(!settled.on(&wanted));
-        assert_eq!(settled.before, Some(PhysicalRect::new(0, 0, 10, 10)));
-        window.busy = false;
-        window.rect = wanted;
-        let settled = settle_window(&mut window, HWND, &wanted, SETTLE_ATTEMPTS).unwrap();
-        assert_eq!(settled.moves, 0);
-        assert!(settled.on(&wanted));
-        assert_eq!(show(None), "unknown");
     }
 }
