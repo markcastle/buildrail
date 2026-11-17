@@ -2,6 +2,14 @@
 
 Every release of BuildRail, newest first. Versions follow [semantic versioning](https://semver.org/): while the version starts with 0, a change in the middle number can change how things look or behave.
 
+Which number to raise:
+
+- **Patch** (0.2.0 to 0.2.1): fixes only. Nothing looks or works differently on purpose.
+- **Minor** (0.2.0 to 0.3.0): something new, or a visible change to how the strip looks or behaves.
+- **Major** (0.x to 1.0.0): the first stable release, and after that any change that breaks a saved profile or a setting people rely on.
+
+The pull request check refuses a version that is not MAJOR.MINOR.PATCH or that is lower than the latest release.
+
 To release, add a section here and set the same version in the root `Cargo.toml`. Merging that to `main` publishes the release automatically, with the section below as its notes.
 
 ## 0.2.0

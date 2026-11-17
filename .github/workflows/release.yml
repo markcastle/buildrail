@@ -58,6 +58,24 @@ jobs:
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
 
+          # Semantic versioning: MAJOR.MINOR.PATCH, optionally -prerelease.
+          if ! [[ "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error file=Cargo.toml::Version '$version' is not a semantic version (MAJOR.MINOR.PATCH)."
+            exit 1
+          fi
+
+          # Versions only move forwards. If this version is not the latest
+          # finished release, it must be higher than it.
+          latest=$(gh api "repos/$GITHUB_REPOSITORY/releases" --paginate --jq '.[] | select(.draft | not) | select([.assets[] | select(.name | endswith(".zip"))] | length > 0) | .tag_name' | sed 's/^v//' | sort -V | tail -n 1)
+          if [[ -n "$latest" && "$version" != "$latest" ]]; then
+            highest=$(printf '%s\n%s\n' "$latest" "$version" | sort -V | tail -n 1)
+            if [[ "$highest" != "$version" ]]; then
+              echo "::error file=Cargo.toml::Version $version is lower than the latest release ($latest). Versions must go up."
+              exit 1
+            fi
+          fi
+          echo "Version $version (latest release: ${latest:-none})"
+
           # The changelog section becomes the release notes. Checked on pull
           # requests too, so this can never be the reason a release fails.
           awk -v v="$version" '
@@ -102,7 +120,7 @@ jobs:
           sha256sum "$name.zip" > "$name.zip.sha256"
           ls -l "$name" "$name.zip"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: ${{ steps.plan.outputs.asset }}
           path: |

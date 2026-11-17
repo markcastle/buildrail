@@ -65,7 +65,7 @@ jobs:
       # The gate is deliberately below the current figure so that a small
       # refactor does not fail the build, but a real drop does.
       - run: xvfb-run -a cargo llvm-cov --workspace --lcov --output-path lcov.info --fail-under-lines 90
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: lcov
           path: lcov.info

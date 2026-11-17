@@ -160,7 +160,8 @@ When that reaches `main`, the Release workflow builds the Windows executable, cr
 A few things follow from this.
 
 - **Every pull request gets a test build.** The zip is attached to the pull request's Release run under Artifacts, so a change can be tried on Windows before it is merged.
-- **A pull request fails early** if its version has no changelog section, so that can never break a release after the merge.
+- **Versions follow semantic versioning** (MAJOR.MINOR.PATCH); `CHANGELOG.md` says which number to raise.
+- **A pull request fails early** if its version is not a semantic version, is lower than the latest release, or has no changelog section, so none of those can break a release after the merge.
 - **Merging without a version bump releases nothing.** The change waits on `main` for the next version.
 - **If a release run fails**, fix the cause and press "Run workflow" on the Release workflow for `main`. A release with no zip attached counts as unfinished and is replaced, tag included.
 - **Do not create tags or releases by hand.** The workflow owns them, which is what keeps the tag, the version and the exe in step.
