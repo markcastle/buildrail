@@ -1,21 +1,21 @@
-//! Windows AppBar dock. Protocol and maths: [`crate::dock::appbar`] (pure).
+//! Windows AppBar dock: the FFI behind [`crate::dock::appbar`]'s two ports.
+//! Every decision (what to propose, how to read the shell's answer, when
+//! to move the window) is made there and unit tested on every OS.
 
-use raw_window_handle::RawWindowHandle;
-use windows_sys::Win32::Foundation::HWND;
+use windows_sys::Win32::Foundation::{HWND, RECT};
 use windows_sys::Win32::UI::Shell::{
-    SHAppBarMessage, ABE_BOTTOM, ABM_NEW, ABM_QUERYPOS, ABM_REMOVE, ABM_SETPOS, APPBARDATA,
+    SHAppBarMessage, ABE_BOTTOM, ABE_TOP, ABM_ACTIVATE, ABM_NEW, ABM_QUERYPOS, ABM_REMOVE,
+    ABM_SETPOS, ABM_WINDOWPOSCHANGED, APPBARDATA,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    RegisterWindowMessageW, SetWindowPos, HWND_BOTTOM, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE,
-    SWP_NOSIZE,
+    GetWindowRect, RegisterWindowMessageW, SetWindowPos, HWND_BOTTOM, HWND_TOPMOST,
+    SWP_ASYNCWINDOWPOS, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
 };
 
-use super::{from_rect, hwnd_from, last_error, to_rect};
-use crate::dock::{
-    after_query, decode_notification, query_proposal, win32_hwnd, AppBarNotification, DockError,
-    DockEvent, DockOutcome, EdgeDock, ReservationGuarantee, UnsupportedReason,
-};
-use crate::geometry::{MonitorInfo, PhysicalRect};
+use super::{hwnd_from, last_error};
+use crate::dock::appbar::{AppBar, AppBarShell, AppBarWindow, Edges};
+use crate::dock::{DockError, Edge};
+use crate::geometry::PhysicalRect;
 use crate::wide::to_wide;
 
 const CALLBACK_NAME: &str = "BuildRail.AppBarNotify";
@@ -33,6 +33,103 @@ fn appbar_message(message: u32, data: &mut APPBARDATA) -> usize {
     // SAFETY: `data` is an initialised APPBARDATA with `cbSize` set, borrowed
     // exclusively for the duration of the call.
     unsafe { SHAppBarMessage(message, data) }
+}
+
+fn edges_to_rect(edges: Edges) -> RECT {
+    RECT {
+        left: edges.left,
+        top: edges.top,
+        right: edges.right,
+        bottom: edges.bottom,
+    }
+}
+
+fn rect_to_edges(rect: &RECT) -> Edges {
+    Edges {
+        left: rect.left,
+        top: rect.top,
+        right: rect.right,
+        bottom: rect.bottom,
+    }
+}
+
+/// `SHAppBarMessage` for one callback message id.
+#[derive(Debug, Clone, Copy)]
+pub struct Win32Shell {
+    callback: u32,
+}
+
+impl Win32Shell {
+    /// A shell port notifying with BuildRail's registered message.
+    pub fn new() -> Self {
+        Self {
+            callback: callback_message().unwrap_or(0),
+        }
+    }
+
+    fn data(&self, window: isize, edge: Edge, rect: Edges) -> APPBARDATA {
+        APPBARDATA {
+            cbSize: u32::try_from(std::mem::size_of::<APPBARDATA>()).unwrap_or(0),
+            hWnd: hwnd_from(window),
+            uCallbackMessage: self.callback,
+            uEdge: match edge {
+                Edge::Top => ABE_TOP,
+                Edge::Bottom => ABE_BOTTOM,
+            },
+            rc: edges_to_rect(rect),
+            lParam: 0,
+        }
+    }
+}
+
+impl Default for Win32Shell {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl AppBarShell for Win32Shell {
+    fn register(&mut self, window: isize) -> Result<(), DockError> {
+        let mut data = self.data(window, Edge::Bottom, Edges::default());
+        if appbar_message(ABM_NEW, &mut data) == 0 {
+            return Err(DockError::Win32 {
+                operation: "SHAppBarMessage(ABM_NEW)",
+                code: last_error(),
+            });
+        }
+        Ok(())
+    }
+
+    fn query_pos(&mut self, window: isize, edge: Edge, proposed: Edges) -> Edges {
+        let mut data = self.data(window, edge, proposed);
+        appbar_message(ABM_QUERYPOS, &mut data);
+        rect_to_edges(&data.rc)
+    }
+
+    fn set_pos(&mut self, window: isize, edge: Edge, rect: Edges) -> Edges {
+        let mut data = self.data(window, edge, rect);
+        appbar_message(ABM_SETPOS, &mut data);
+        rect_to_edges(&data.rc)
+    }
+
+    fn remove(&mut self, window: isize) {
+        let mut data = self.data(window, Edge::Bottom, Edges::default());
+        appbar_message(ABM_REMOVE, &mut data);
+    }
+
+    fn activate(&mut self, window: isize) {
+        let mut data = self.data(window, Edge::Bottom, Edges::default());
+        appbar_message(ABM_ACTIVATE, &mut data);
+    }
+
+    fn window_pos_changed(&mut self, window: isize) {
+        let mut data = self.data(window, Edge::Bottom, Edges::default());
+        appbar_message(ABM_WINDOWPOSCHANGED, &mut data);
+    }
+
+    fn callback_message(&self) -> u32 {
+        self.callback
+    }
 }
 
 fn set_window_pos(
@@ -55,159 +152,55 @@ fn set_window_pos(
     Ok(())
 }
 
-/// The Windows AppBar implementation of [`EdgeDock`].
-#[derive(Debug)]
-pub struct WindowsAppBar {
-    hwnd: Option<isize>,
-    callback: u32,
-    current: Option<PhysicalRect>,
-    placement: Option<(MonitorInfo, u32)>,
+/// The window's outer rect, physical pixels (the process is per-monitor
+/// DPI aware, so no coordinates are virtualised).
+pub(crate) fn window_rect(window: isize) -> Option<PhysicalRect> {
+    let mut rect = RECT::default();
+    // SAFETY: `rect` is a valid, writable RECT; an invalid handle makes the
+    // call fail, it is not undefined behaviour.
+    let ok = unsafe { GetWindowRect(hwnd_from(window), &mut rect) };
+    (ok != 0).then(|| super::from_rect(&rect))
 }
 
-impl WindowsAppBar {
-    /// An unregistered AppBar.
-    pub fn new() -> Self {
-        Self {
-            hwnd: None,
-            callback: callback_message().unwrap_or(0),
-            current: None,
-            placement: None,
-        }
+/// Moves the strip's window with `SetWindowPos`.
+///
+/// Moves are posted to the window's own thread (`SWP_ASYNCWINDOWPOS`): the
+/// dock runs on BuildRail's shell thread, and a synchronous cross-thread
+/// `SetWindowPos` would wait for the UI thread, which itself waits for the
+/// shell thread when it gives the screen edge back on exit. From the
+/// window's own thread (the tests) the move happens at once.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Win32Window;
+
+impl AppBarWindow for Win32Window {
+    fn rect(&self, window: isize) -> Option<PhysicalRect> {
+        window_rect(window)
     }
 
-    fn data(&self, hwnd: isize, rect: Option<&PhysicalRect>) -> APPBARDATA {
-        APPBARDATA {
-            cbSize: u32::try_from(std::mem::size_of::<APPBARDATA>()).unwrap_or(0),
-            hWnd: hwnd_from(hwnd),
-            uCallbackMessage: self.callback,
-            uEdge: ABE_BOTTOM,
-            rc: rect.map(to_rect).unwrap_or_default(),
-            lParam: 0,
-        }
-    }
-
-    fn position(&mut self, hwnd: isize, force: bool) -> Result<DockOutcome, DockError> {
-        let (monitor, height) = self.placement.clone().ok_or(DockError::NotReserved)?;
-        let mut data = self.data(hwnd, Some(&query_proposal(&monitor, height)));
-        appbar_message(ABM_QUERYPOS, &mut data);
-        let wanted = after_query(&from_rect(&data.rc), &monitor, height);
-        let reserved = |rect| DockOutcome::Reserved {
+    fn place(&mut self, window: isize, rect: &PhysicalRect) -> Result<(), DockError> {
+        set_window_pos(
+            hwnd_from(window),
+            HWND_TOPMOST,
             rect,
-            guarantee: ReservationGuarantee::Enforced,
-        };
-        if !force && self.current == Some(wanted) {
-            return Ok(reserved(wanted));
-        }
-        data.rc = to_rect(&wanted);
-        appbar_message(ABM_SETPOS, &mut data);
-        let rect = from_rect(&data.rc);
-        set_window_pos(hwnd_from(hwnd), HWND_TOPMOST, &rect, SWP_NOACTIVATE)?;
-        self.current = Some(rect);
-        Ok(reserved(rect))
+            SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS,
+        )
+    }
+
+    fn set_topmost(&mut self, window: isize, topmost: bool) -> Result<(), DockError> {
+        let after = if topmost { HWND_TOPMOST } else { HWND_BOTTOM };
+        set_window_pos(
+            hwnd_from(window),
+            after,
+            &PhysicalRect::default(),
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS,
+        )
     }
 }
 
-impl Default for WindowsAppBar {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+/// The Windows AppBar implementation of [`crate::dock::EdgeDock`].
+pub type WindowsAppBar = AppBar<Win32Shell, Win32Window>;
 
-impl EdgeDock for WindowsAppBar {
-    fn reserve(
-        &mut self,
-        window: RawWindowHandle,
-        monitor: &MonitorInfo,
-        strip_height_logical: u32,
-    ) -> Result<DockOutcome, DockError> {
-        let Some(hwnd) = win32_hwnd(&window) else {
-            return Ok(DockOutcome::Unsupported {
-                reason: UnsupportedReason::UnsupportedWindowHandle,
-            });
-        };
-        if self.hwnd.is_some_and(|h| h != hwnd) {
-            self.release()?;
-        }
-        if self.hwnd.is_none() {
-            let mut data = self.data(hwnd, None);
-            if appbar_message(ABM_NEW, &mut data) == 0 {
-                return Err(DockError::Win32 {
-                    operation: "SHAppBarMessage(ABM_NEW)",
-                    code: last_error(),
-                });
-            }
-            self.hwnd = Some(hwnd);
-        }
-        self.placement = Some((monitor.clone(), strip_height_logical));
-        self.position(hwnd, true)
-    }
-
-    fn update(
-        &mut self,
-        monitor: &MonitorInfo,
-        strip_height_logical: u32,
-    ) -> Result<DockOutcome, DockError> {
-        let hwnd = self.hwnd.ok_or(DockError::NotReserved)?;
-        self.placement = Some((monitor.clone(), strip_height_logical));
-        self.position(hwnd, false)
-    }
-
-    fn release(&mut self) -> Result<(), DockError> {
-        if let Some(hwnd) = self.hwnd.take() {
-            let mut data = self.data(hwnd, None);
-            appbar_message(ABM_REMOVE, &mut data);
-        }
-        self.current = None;
-        self.placement = None;
-        Ok(())
-    }
-
-    fn handle_native_message(
-        &mut self,
-        message: u32,
-        wparam: usize,
-        lparam: isize,
-    ) -> Option<DockEvent> {
-        let hwnd = self.hwnd?;
-        if message != self.callback || self.callback == 0 {
-            return None;
-        }
-        let z_only = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE;
-        match decode_notification(wparam, lparam)? {
-            AppBarNotification::PositionChanged | AppBarNotification::StateChanged => {
-                match self.position(hwnd, false) {
-                    Ok(DockOutcome::Reserved { rect, .. }) => {
-                        Some(DockEvent::Repositioned { rect })
-                    }
-                    Ok(DockOutcome::Unsupported { .. }) => None,
-                    Err(err) => {
-                        tracing::warn!("AppBar reposition failed: {err}");
-                        None
-                    }
-                }
-            }
-            AppBarNotification::FullscreenApp(entered) => {
-                // As the AppBar docs prescribe: drop below the fullscreen
-                // app, and come back on top when it closes.
-                let after = if entered { HWND_BOTTOM } else { HWND_TOPMOST };
-                if let Err(err) =
-                    set_window_pos(hwnd_from(hwnd), after, &PhysicalRect::default(), z_only)
-                {
-                    tracing::debug!("AppBar z-order change failed: {err}");
-                }
-                Some(if entered {
-                    DockEvent::FullscreenEntered
-                } else {
-                    DockEvent::FullscreenLeft
-                })
-            }
-            AppBarNotification::WindowArrange(_) => None,
-        }
-    }
-}
-
-impl Drop for WindowsAppBar {
-    fn drop(&mut self) {
-        let _ = self.release();
-    }
+/// An unregistered [`WindowsAppBar`].
+pub fn windows_appbar() -> WindowsAppBar {
+    AppBar::with_ports(Win32Shell::new(), Win32Window)
 }

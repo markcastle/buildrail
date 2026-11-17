@@ -1,7 +1,13 @@
 //! [`BuildRailUi`]: one frame of the whole UI (strip + Settings viewport),
 //! independent of eframe so that `egui_kittest` can drive it exactly as
 //! the real window does.
+//!
+//! Each frame ends by scheduling the next one with
+//! [`RepaintPlanner`]: when the words on the strip next change on their
+//! own, or the next animation step when the user turned Animation on.
+//! Nothing else here asks for frames, so an idle strip paints nothing.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use eframe::egui::{self, Ui, ViewportBuilder, ViewportId};
@@ -12,6 +18,30 @@ use super::strip::{StripAction, StripView};
 use super::style;
 use super::theme::Tokens;
 use crate::app::AppController;
+use crate::presentation::repaint::animation_phase;
+use crate::presentation::{Motion, RepaintPlanner};
+
+/// Counts painted frames (UI passes). Cheap to clone and to bump; shared
+/// with whoever reports the frame rate.
+#[derive(Debug, Clone, Default)]
+pub struct FrameCounter(Arc<AtomicU64>);
+
+impl FrameCounter {
+    /// A counter at zero.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Counts one frame.
+    pub fn record(&self) {
+        self.0.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Frames counted so far.
+    pub fn total(&self) -> u64 {
+        self.0.load(Ordering::Relaxed)
+    }
+}
 
 /// What the host window must do after a frame.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -20,7 +50,8 @@ pub struct FrameOutput {
     pub start_drag: bool,
     /// Placement, monitor or scale preferences changed.
     pub placement_changed: bool,
-    /// The user chose Quit BuildRail.
+    /// The user chose Quit BuildRail, or an installed update is
+    /// restarting the app: close the window.
     pub quit: bool,
 }
 
@@ -43,6 +74,15 @@ pub struct BuildRailUi {
     styled: Option<Tokens>,
     fonts: FontSetup,
     font_family: Option<&'static str>,
+    frames: FrameCounter,
+    /// Motion is allowed at all (tests and screenshots turn it off).
+    motion_allowed: bool,
+    /// The desktop asked for less motion.
+    reduced_motion: bool,
+    /// The strip is on screen (not hidden for a fullscreen app).
+    strip_visible: bool,
+    /// The delay the last frame asked for, for tests.
+    next_repaint: Option<std::time::Duration>,
 }
 
 impl BuildRailUi {
@@ -70,6 +110,11 @@ impl BuildRailUi {
                 installed: false,
             },
             font_family: None,
+            frames: FrameCounter::new(),
+            motion_allowed: true,
+            reduced_motion: false,
+            strip_visible: true,
+            next_repaint: None,
         }
     }
 
@@ -91,6 +136,11 @@ impl BuildRailUi {
     /// The system font family in use, once installed (`None` = egui's own).
     pub fn font_family(&self) -> Option<&'static str> {
         self.font_family
+    }
+
+    /// The strip widget's state (which popups are open).
+    pub fn strip_view(&self) -> &StripView {
+        &self.strip
     }
 
     /// The controller.
@@ -138,10 +188,51 @@ impl BuildRailUi {
         self.movable = movable;
     }
 
-    /// Turns the running-spinner animation on or off (tests turn it off so
-    /// frames settle).
+    /// How the strip sits and the connected monitors (see
+    /// [`StripView::set_surroundings`]).
+    pub fn set_strip_surroundings(
+        &mut self,
+        side: crate::presentation::StripSide,
+        monitors: Vec<buildrail_platform::geometry::MonitorInfo>,
+    ) {
+        self.strip.set_surroundings(side, monitors);
+    }
+
+    /// Allows or forbids motion whatever the preference says (tests and
+    /// screenshots forbid it so frames settle).
     pub fn set_animate(&mut self, animate: bool) {
-        self.strip.animate = animate;
+        self.motion_allowed = animate;
+    }
+
+    /// Whether the desktop asked for less motion (see
+    /// `buildrail_platform::motion`).
+    pub fn set_reduced_motion(&mut self, reduced: bool) {
+        self.reduced_motion = reduced;
+    }
+
+    /// Whether the strip is on screen; a hidden strip never animates.
+    pub fn set_strip_visible(&mut self, visible: bool) {
+        self.strip_visible = visible;
+    }
+
+    /// The frame counter (shared; see [`FrameCounter`]).
+    pub fn frame_counter(&self) -> FrameCounter {
+        self.frames.clone()
+    }
+
+    /// How long after the last frame it asked to be painted again
+    /// (`None`: not until something changes).
+    pub fn next_repaint(&self) -> Option<std::time::Duration> {
+        self.next_repaint
+    }
+
+    /// The planner for this frame's preferences and state.
+    pub fn planner(&self) -> RepaintPlanner {
+        RepaintPlanner::new(Motion {
+            enabled: self.motion_allowed && self.controller.prefs().animation,
+            reduced: self.reduced_motion,
+            visible: self.strip_visible,
+        })
     }
 
     /// The tokens for the current preferences and OS theme.
@@ -175,11 +266,28 @@ impl BuildRailUi {
     /// Runs one frame in `ui` (the root viewport's UI).
     pub fn ui(&mut self, ui: &mut Ui) -> FrameOutput {
         let ctx = ui.ctx().clone();
+        self.frames.record();
         let mut output = FrameOutput::default();
         let tokens = self.begin_frame(&ctx);
+        // An installed update restarts the app: close cleanly.
+        output.quit = self.controller.poll_update();
+        self.controller
+            .maybe_install_automatically(self.settings_open);
+        self.strip.set_update(self.controller.update_chip());
 
+        let now = self.controller.now();
         let model = self.controller.strip();
-        for action in self.strip.show(ui, &model, &tokens, self.movable) {
+        let planner = self.planner();
+        let phase = if planner.animating(&model) {
+            animation_phase(ctx.input(|i| i.time))
+        } else {
+            0
+        };
+        self.next_repaint = planner.next_repaint(&model, now);
+        if let Some(delay) = self.next_repaint {
+            ctx.request_repaint_after(delay);
+        }
+        for action in self.strip.show(ui, &model, &tokens, self.movable, phase) {
             match action {
                 StripAction::Open(url) => {
                     self.last_error = self.controller.open_url(&url).err();
@@ -194,6 +302,15 @@ impl BuildRailUi {
                     self.settings_open = true;
                 }
                 StripAction::StartDrag => output.start_drag = true,
+                StripAction::InstallUpdate => self.controller.install_update(),
+                StripAction::OpenUpdates => {
+                    self.settings.page = super::settings::Page::About;
+                    self.settings_open = true;
+                }
+                StripAction::UpdateNotes(url) => {
+                    self.last_error = self.controller.open_url(&url).err();
+                }
+                StripAction::DismissUpdate => self.controller.dismiss_update(),
             }
         }
 
@@ -223,7 +340,7 @@ impl BuildRailUi {
                 },
             );
             output.placement_changed = outcome.placement_changed;
-            output.quit = outcome.quit;
+            output.quit |= outcome.quit;
             if close || outcome.close {
                 self.settings_open = false;
             }
@@ -236,6 +353,7 @@ impl BuildRailUi {
     pub fn settings_ui(&mut self, ui: &mut Ui) -> FrameOutput {
         let ctx = ui.ctx().clone();
         let tokens = self.begin_frame(&ctx);
+        let restarting = self.controller.poll_update();
         let outcome = self
             .settings
             .ui(ui, &mut self.controller, &self.device, &tokens);
@@ -245,7 +363,7 @@ impl BuildRailUi {
         FrameOutput {
             start_drag: false,
             placement_changed: outcome.placement_changed,
-            quit: outcome.quit,
+            quit: outcome.quit || restarting,
         }
     }
 }

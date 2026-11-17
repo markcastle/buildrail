@@ -111,13 +111,15 @@
 //! launch_at_startup = true
 //! theme = "system"            # "system" | "light" | "dark"
 //! scale = 1.25                # optional override, 0.5–4.0
+//! animation = true            # optional; animate the in-progress glyph
+//! update_automatically = true  # optional; install new releases at a quiet moment
 //!
 //! [monitor]                   # optional; absent means the primary monitor
 //! id = '\\.\DISPLAY2'
 //! name = "DELL U2720Q"        # fallback match when the id changed
 //!
 //! [placement]
-//! mode = "floating"           # or "docked-bottom"
+//! mode = "floating"           # or "docked-bottom" (the default), "docked-top"
 //! position = { x = 120, y = 40 }
 //!
 //! [connections.work-github]

@@ -5,11 +5,13 @@
 //! real adapters, the `--demo` fakes and test fakes, and the controller
 //! cannot tell the difference.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use buildrail_core::ports::{Clock, CredentialReader, CredentialWriter};
 use buildrail_core::refresh::SourceRegistry;
 use buildrail_platform::autostart::Autostart;
+use buildrail_platform::folders::FolderOpener;
 use buildrail_platform::url_opener::UrlOpener;
 use buildrail_profile::{DevicePrefsStore, ProfileStore};
 use buildrail_providers::catalog::{
@@ -23,6 +25,18 @@ use buildrail_providers::catalog::{
 pub trait CredentialStore: CredentialReader + CredentialWriter {}
 
 impl<T: CredentialReader + CredentialWriter + ?Sized> CredentialStore for T {}
+
+/// Asks the person for a file with the system's own open and save
+/// dialogs. Blocking: the dialog is modal and answers when it closes.
+/// `None` means they cancelled (or no dialog could be shown; the Share
+/// page keeps a path field as the fallback).
+pub trait FileDialog: Send + Sync {
+    /// "Which profile do you want to import?"
+    fn open_profile(&self) -> Option<PathBuf>;
+    /// "Where do you want to save your profile?", suggesting
+    /// `suggested_name`.
+    fn save_profile(&self, suggested_name: &str) -> Option<PathBuf>;
+}
 
 /// The catalogue ports the Add-build wizard browses with, one per
 /// question (interface segregation: tests fake only what they use).
@@ -84,4 +98,12 @@ pub struct Services {
     pub profile_store: ProfileStore,
     /// Where this device's preferences live.
     pub prefs_store: DevicePrefsStore,
+    /// Open and save dialogs (Share page).
+    pub dialogs: Arc<dyn FileDialog>,
+    /// Shows a folder in the file manager (the log folder).
+    pub folders: Arc<dyn FolderOpener>,
+    /// Where log files are written, when they are.
+    pub logs_dir: Option<PathBuf>,
+    /// Checks for, installs and starts new releases.
+    pub updates: Arc<dyn super::updates::UpdateService>,
 }

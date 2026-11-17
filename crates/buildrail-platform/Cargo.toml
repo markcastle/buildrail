@@ -3,9 +3,9 @@ name = "buildrail-platform"
 description = "BuildRail platform adapters: credential store, edge docking, fullscreen detection, URL opening, launch at login."
 version.workspace = true
 edition.workspace = true
-# keyring 4.x (the OS credential store adapter) requires Rust 1.88, one step
-# above the workspace's 1.85. Everything else here builds on 1.85.
-rust-version = "1.88"
+# The workspace's 1.95 covers keyring 4.x (1.88) and `File::try_lock`
+# (the single-instance lock file, 1.89).
+rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
@@ -20,11 +20,20 @@ webbrowser = { version = "1", features = ["hardened"] }
 [target.'cfg(all(unix, not(any(target_os = "macos", target_os = "ios", target_os = "android"))))'.dependencies]
 x11rb = { version = "0.14", features = ["randr"] }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+# NSScreen.visibleFrame: the floating strip sits above the Dock.
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSEnumerator", "NSGeometry"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSScreen", "objc2-core-foundation"] }
+
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
+    "Win32_Security",
+    "Win32_System_Console",
     "Win32_System_Registry",
+    "Win32_System_Threading",
     "Win32_UI_HiDpi",
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
@@ -32,6 +41,16 @@ windows-sys = { version = "0.61", features = [
 
 [dev-dependencies]
 tempfile = "3"
+
+# The Windows AppBar integration tests open a real window and read the
+# work area themselves (tests/windows_appbar.rs).
+[target.'cfg(windows)'.dev-dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_System_LibraryLoader",
+    "Win32_UI_HiDpi",
+    "Win32_UI_WindowsAndMessaging",
+] }
 
 [lints]
 workspace = true

@@ -38,7 +38,8 @@ pub enum IconKind {
     CheckCircle,
     /// A diagonal cross: failed.
     Cross,
-    /// A partial ring (animated in the UI): running.
+    /// A faint ring with a bold arc: running. Static unless the user
+    /// turned Animation on.
     Spinner,
     /// A hollow ring with a dot: queued, waiting to start.
     Queued,
@@ -122,6 +123,10 @@ pub struct StripEntry {
     pub accessible_name: String,
     /// The provider page to open on activation, when there is a run.
     pub url: Option<String>,
+    /// The instants whose relative age this entry shows somewhere (note,
+    /// details or accessible name), so the UI knows when its text next
+    /// changes (see [`crate::presentation::repaint`]).
+    pub ages: Vec<DateTime<Utc>>,
 }
 
 impl StripEntry {
@@ -341,7 +346,23 @@ fn entry(watch: &Watch, snapshot: &WatchSnapshot, now: DateTime<Utc>) -> StripEn
         hint,
         accessible_name: spoken.join(", "),
         url: record.map(|r| r.url.clone()),
+        ages: age_anchors(record, &snapshot.freshness, confirmed_at),
     }
+}
+
+/// The instants an entry's text measures an age from: the run's last
+/// update (details, accessible name) and, unless the data is fresh, when
+/// it was last confirmed (the "5 min ago · offline" note).
+fn age_anchors(
+    record: Option<&BuildRecord>,
+    freshness: &Freshness,
+    confirmed_at: Option<DateTime<Utc>>,
+) -> Vec<DateTime<Utc>> {
+    let mut ages: Vec<DateTime<Utc>> = record.map(|r| r.updated_at).into_iter().collect();
+    if !matches!(freshness, Freshness::Fresh) {
+        ages.extend(confirmed_at.filter(|at| !ages.contains(at)));
+    }
+    ages
 }
 
 /// The failing job, only for failed runs (a stale name from an earlier

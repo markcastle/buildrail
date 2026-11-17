@@ -16,9 +16,36 @@ use std::fmt;
 /// The strip height the product targets, in logical pixels.
 pub const STRIP_HEIGHT_LOGICAL: u32 = 24;
 
-/// Gap, in logical pixels, between the floating window and the bottom of the
-/// work area when no position has been remembered.
+/// Gap, in logical pixels, between the floating window and the edge of the
+/// work area it defaults to when no position has been remembered.
 pub const FLOAT_BOTTOM_MARGIN_LOGICAL: u32 = 8;
+
+/// The screen edge a docked strip sits on (and a floating one defaults
+/// to).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub enum Edge {
+    /// Along the top of the monitor.
+    Top,
+    /// Along the bottom of the monitor (directly above a bottom taskbar).
+    #[default]
+    Bottom,
+}
+
+impl Edge {
+    /// `"top"` or `"bottom"`, for logs.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Top => "top",
+            Self::Bottom => "bottom",
+        }
+    }
+}
+
+impl fmt::Display for Edge {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
 
 /// An axis-aligned rectangle in physical pixels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
@@ -240,44 +267,48 @@ pub fn resolve_monitor<'a>(
 ///
 /// On X11 the window manager subtracts our strut from the work area it
 /// reports, so recomputing the dock rect from that work area would move the
-/// strip up by its own height each time. When `own` sits flush against the
-/// bottom of `work_area` and overlaps it horizontally, the work area is
-/// extended down to cover it again.
+/// strip inwards by its own height each time. When `own` sits flush against
+/// the `edge` side of `work_area` and overlaps it horizontally, the work
+/// area is extended to cover it again.
 pub fn work_area_without_own_strip(
     work_area: &PhysicalRect,
+    edge: Edge,
     own: Option<&PhysicalRect>,
 ) -> PhysicalRect {
-    match own {
-        Some(own)
-            if own.y == work_area.bottom()
-                && own.x < work_area.right()
-                && own.right() > work_area.x =>
-        {
+    let Some(own) = own else {
+        return *work_area;
+    };
+    let overlaps = own.x < work_area.right() && own.right() > work_area.x;
+    match edge {
+        Edge::Bottom if overlaps && own.y == work_area.bottom() => {
             PhysicalRect::from_edges(work_area.x, work_area.y, work_area.right(), own.bottom())
+        }
+        Edge::Top if overlaps && own.bottom() == work_area.y => {
+            PhysicalRect::from_edges(work_area.x, own.y, work_area.right(), work_area.bottom())
         }
         _ => *work_area,
     }
 }
 
-/// Where a bottom-docked strip goes: full work-area width, sitting directly
-/// on the bottom of the work area (that is, immediately above a bottom
-/// taskbar or panel).
+/// Where a docked strip goes: full work-area width, sitting directly on
+/// the `edge` side of the work area (that is, immediately above a bottom
+/// taskbar or panel, or below a top one).
 ///
 /// `own_reservation` is the rect this strip currently reserves, if any (see
 /// [`work_area_without_own_strip`]).
 pub fn dock_rect(
     monitor: &MonitorInfo,
+    edge: Edge,
     strip_height_logical: u32,
     own_reservation: Option<&PhysicalRect>,
 ) -> PhysicalRect {
-    let work = work_area_without_own_strip(&monitor.work_area, own_reservation);
+    let work = work_area_without_own_strip(&monitor.work_area, edge, own_reservation);
     let height = monitor.to_physical(strip_height_logical).min(work.height);
-    PhysicalRect::new(
-        work.x,
-        work.bottom() - i32::try_from(height).unwrap_or(0),
-        work.width,
-        height,
-    )
+    let y = match edge {
+        Edge::Top => work.y,
+        Edge::Bottom => work.bottom() - i32::try_from(height).unwrap_or(0),
+    };
+    PhysicalRect::new(work.x, y, work.width, height)
 }
 
 /// Size of the compact movable window, in logical pixels.
@@ -304,8 +335,8 @@ pub struct PhysicalPosition {
 ///   mostly visible; it is sized for, and clamped into the work area of, the
 ///   monitor it overlaps most. If it overlaps no monitor (the display it was
 ///   on has been unplugged), it is clamped onto the chosen/primary monitor.
-/// * Without one: horizontally centred near the bottom of the chosen (or
-///   primary) monitor's work area.
+/// * Without one: horizontally centred near the `edge` (bottom or top) of
+///   the chosen (or primary) monitor's work area.
 ///
 /// Returns `None` only when `monitors` is empty.
 pub fn float_rect(
@@ -313,10 +344,11 @@ pub fn float_rect(
     chosen: Option<&MonitorId>,
     size: LogicalSize,
     remembered: Option<PhysicalPosition>,
+    edge: Edge,
 ) -> Option<PhysicalRect> {
     let fallback = resolve_monitor(monitors, chosen)?;
     let Some(pos) = remembered else {
-        return Some(default_float_rect(fallback, size));
+        return Some(default_float_rect(fallback, size, edge));
     };
     let probe_on = |m: &MonitorInfo| {
         PhysicalRect::new(
@@ -336,13 +368,16 @@ pub fn float_rect(
     Some(probe_on(target).clamped_into(&target.work_area))
 }
 
-fn default_float_rect(monitor: &MonitorInfo, size: LogicalSize) -> PhysicalRect {
+fn default_float_rect(monitor: &MonitorInfo, size: LogicalSize, edge: Edge) -> PhysicalRect {
     let work = monitor.work_area;
     let width = monitor.to_physical(size.width);
     let height = monitor.to_physical(size.height);
     let margin = monitor.to_physical(FLOAT_BOTTOM_MARGIN_LOGICAL);
     let x = i64::from(work.x) + (i64::from(work.width) - i64::from(width)) / 2;
-    let y = i64::from(work.bottom()) - i64::from(height) - i64::from(margin);
+    let y = match edge {
+        Edge::Top => i64::from(work.y) + i64::from(margin),
+        Edge::Bottom => i64::from(work.bottom()) - i64::from(height) - i64::from(margin),
+    };
     let rect = PhysicalRect::new(
         i32::try_from(x).unwrap_or(work.x),
         i32::try_from(y).unwrap_or(work.y),
@@ -493,18 +528,18 @@ mod tests {
 
     #[test]
     fn dock_sits_directly_above_the_taskbar() {
-        let rect = dock_rect(&primary(), STRIP_HEIGHT_LOGICAL, None);
+        let rect = dock_rect(&primary(), Edge::Bottom, STRIP_HEIGHT_LOGICAL, None);
         assert_eq!(rect, PhysicalRect::new(0, 1008, 1920, 24));
         assert_eq!(rect.bottom(), 1032);
     }
 
     #[test]
     fn dock_handles_negative_origins_and_fractional_scale() {
-        let rect = dock_rect(&left_hidpi(), STRIP_HEIGHT_LOGICAL, None);
+        let rect = dock_rect(&left_hidpi(), Edge::Bottom, STRIP_HEIGHT_LOGICAL, None);
         assert_eq!(rect, PhysicalRect::new(-2560, 1180 - 36, 2560, 36));
         let mut m = left_hidpi();
         m.scale_factor = 1.25;
-        assert_eq!(dock_rect(&m, 24, None).height, 30);
+        assert_eq!(dock_rect(&m, Edge::Bottom, 24, None).height, 30);
     }
 
     #[test]
@@ -517,7 +552,7 @@ mod tests {
             true,
         );
         assert_eq!(
-            dock_rect(&m, 24, None),
+            dock_rect(&m, Edge::Bottom, 24, None),
             PhysicalRect::new(62, 1056, 1858, 24)
         );
     }
@@ -525,10 +560,10 @@ mod tests {
     #[test]
     fn dock_does_not_climb_when_the_wm_subtracts_our_own_strut() {
         let m = primary();
-        let first = dock_rect(&m, 24, None);
+        let first = dock_rect(&m, Edge::Bottom, 24, None);
         let mut shrunk = m.clone();
         shrunk.work_area = PhysicalRect::from_edges(0, 0, 1920, first.y);
-        assert_eq!(dock_rect(&shrunk, 24, Some(&first)), first);
+        assert_eq!(dock_rect(&shrunk, Edge::Bottom, 24, Some(&first)), first);
     }
 
     #[test]
@@ -536,12 +571,12 @@ mod tests {
         let m = primary();
         let elsewhere = PhysicalRect::new(-2560, 500, 100, 24);
         assert_eq!(
-            work_area_without_own_strip(&m.work_area, Some(&elsewhere)),
+            work_area_without_own_strip(&m.work_area, Edge::Bottom, Some(&elsewhere)),
             m.work_area
         );
         let below_but_not_flush = PhysicalRect::new(0, 1040, 1920, 24);
         assert_eq!(
-            work_area_without_own_strip(&m.work_area, Some(&below_but_not_flush)),
+            work_area_without_own_strip(&m.work_area, Edge::Bottom, Some(&below_but_not_flush)),
             m.work_area
         );
     }
@@ -555,7 +590,62 @@ mod tests {
             2.0,
             true,
         );
-        assert_eq!(dock_rect(&m, 24, None), PhysicalRect::new(0, 0, 100, 10));
+        assert_eq!(
+            dock_rect(&m, Edge::Bottom, 24, None),
+            PhysicalRect::new(0, 0, 100, 10)
+        );
+    }
+
+    #[test]
+    fn top_dock_sits_directly_below_a_top_taskbar() {
+        let m = monitor(
+            "top-taskbar",
+            PhysicalRect::new(0, 0, 1920, 1080),
+            PhysicalRect::new(0, 40, 1920, 1040),
+            1.0,
+            true,
+        );
+        assert_eq!(
+            dock_rect(&m, Edge::Top, 24, None),
+            PhysicalRect::new(0, 40, 1920, 24)
+        );
+        // A monitor above and to the left (negative origin) at 150 %.
+        assert_eq!(
+            dock_rect(&left_hidpi(), Edge::Top, 24, None),
+            PhysicalRect::new(-2560, -200, 2560, 36)
+        );
+    }
+
+    #[test]
+    fn top_dock_does_not_sink_when_the_wm_subtracts_our_own_strut() {
+        let m = primary();
+        let first = dock_rect(&m, Edge::Top, 24, None);
+        assert_eq!(first, PhysicalRect::new(0, 0, 1920, 24));
+        let mut shrunk = m.clone();
+        shrunk.work_area = PhysicalRect::from_edges(0, first.bottom(), 1920, 1032);
+        assert_eq!(dock_rect(&shrunk, Edge::Top, 24, Some(&first)), first);
+        // A strip reserved at the bottom does not count for the top edge.
+        let bottom = dock_rect(&m, Edge::Bottom, 24, None);
+        assert_eq!(
+            work_area_without_own_strip(&m.work_area, Edge::Top, Some(&bottom)),
+            m.work_area
+        );
+    }
+
+    #[test]
+    fn edge_names() {
+        assert_eq!(Edge::Top.to_string(), "top");
+        assert_eq!(Edge::Bottom.as_str(), "bottom");
+        assert_eq!(Edge::default(), Edge::Bottom);
+    }
+
+    #[test]
+    fn float_defaults_near_the_top_when_asked() {
+        let monitors = [primary(), left_hidpi()];
+        assert_eq!(
+            float_rect(&monitors, None, FLOAT, None, Edge::Top),
+            Some(PhysicalRect::new(760, 8, 400, 24))
+        );
     }
 
     const FLOAT: LogicalSize = LogicalSize {
@@ -566,10 +656,10 @@ mod tests {
     #[test]
     fn float_defaults_to_bottom_centre_of_the_chosen_monitor() {
         let monitors = [primary(), left_hidpi()];
-        let rect = float_rect(&monitors, None, FLOAT, None);
+        let rect = float_rect(&monitors, None, FLOAT, None, Edge::Bottom);
         assert_eq!(rect, Some(PhysicalRect::new(760, 1032 - 24 - 8, 400, 24)));
         let chosen = MonitorId::new("\\\\.\\DISPLAY2");
-        let rect = float_rect(&monitors, Some(&chosen), FLOAT, None);
+        let rect = float_rect(&monitors, Some(&chosen), FLOAT, None, Edge::Bottom);
         // 600x36 physical, centred in x on [-2560, 0), 12 px margin.
         assert_eq!(
             rect,
@@ -582,13 +672,13 @@ mod tests {
         let monitors = [primary(), left_hidpi()];
         let pos = PhysicalPosition { x: 100, y: 200 };
         assert_eq!(
-            float_rect(&monitors, None, FLOAT, Some(pos)),
+            float_rect(&monitors, None, FLOAT, Some(pos), Edge::Bottom),
             Some(PhysicalRect::new(100, 200, 400, 24))
         );
         // On the high-DPI monitor it is sized with that monitor's scale.
         let pos = PhysicalPosition { x: -2000, y: 0 };
         assert_eq!(
-            float_rect(&monitors, None, FLOAT, Some(pos)),
+            float_rect(&monitors, None, FLOAT, Some(pos), Edge::Bottom),
             Some(PhysicalRect::new(-2000, 0, 600, 36))
         );
     }
@@ -598,7 +688,7 @@ mod tests {
         let monitors = [primary()];
         let pos = PhysicalPosition { x: 1800, y: 1070 };
         assert_eq!(
-            float_rect(&monitors, None, FLOAT, Some(pos)),
+            float_rect(&monitors, None, FLOAT, Some(pos), Edge::Bottom),
             Some(PhysicalRect::new(1520, 1008, 400, 24)),
             "partly off the bottom-right corner and over the taskbar"
         );
@@ -609,11 +699,11 @@ mod tests {
         let monitors = [primary()];
         let pos = PhysicalPosition { x: -2000, y: 300 };
         assert_eq!(
-            float_rect(&monitors, None, FLOAT, Some(pos)),
+            float_rect(&monitors, None, FLOAT, Some(pos), Edge::Bottom),
             Some(PhysicalRect::new(0, 300, 400, 24))
         );
-        assert_eq!(float_rect(&[], None, FLOAT, Some(pos)), None);
-        assert_eq!(float_rect(&[], None, FLOAT, None), None);
+        assert_eq!(float_rect(&[], None, FLOAT, Some(pos), Edge::Bottom), None);
+        assert_eq!(float_rect(&[], None, FLOAT, None, Edge::Bottom), None);
     }
 
     #[test]
@@ -622,7 +712,7 @@ mod tests {
         // 600 px wide on the left monitor: x in [-100, 500) is mostly primary.
         let pos = PhysicalPosition { x: -100, y: 100 };
         assert_eq!(
-            float_rect(&monitors, None, FLOAT, Some(pos)),
+            float_rect(&monitors, None, FLOAT, Some(pos), Edge::Bottom),
             Some(PhysicalRect::new(0, 100, 400, 24))
         );
     }

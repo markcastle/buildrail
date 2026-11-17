@@ -4,6 +4,7 @@
 //! recipe: one of a few is a segmented control, on or off is a switch, a
 //! physical display is a picture.
 
+use buildrail_platform::geometry::Edge;
 use buildrail_profile::{DevicePrefs, MonitorChoice, Placement, Theme};
 use eframe::egui::{self, Align, Layout, Ui};
 
@@ -18,9 +19,13 @@ use crate::ui::widgets::{
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PlacementChoice {
-    Docked,
+    Top,
+    Bottom,
     Floating,
 }
+
+/// The Placement row's help when the shell has said nothing yet.
+const PLACEMENT_HELP: &str = "At the top or bottom, the strip sits along that edge of the screen and windows make room for it. Floating, you can drag it anywhere by its caption.";
 
 impl SettingsWindow {
     /// Draws the page; returns `true` when placement, display or scale
@@ -68,11 +73,11 @@ impl SettingsWindow {
                     );
                 },
             );
-            let docked_help = "Docked, the strip sits along the bottom edge and windows make room for it. Floating, you can drag it anywhere by its caption.";
-            let help = device.placement_note.as_deref().unwrap_or(docked_help);
+            let help = device.placement_note.as_deref().unwrap_or(PLACEMENT_HELP);
             g.row("Placement", Some(help), |ui| {
                 let mut choice = match prefs.placement {
-                    Placement::DockedBottom => PlacementChoice::Docked,
+                    Placement::DockedTop => PlacementChoice::Top,
+                    Placement::DockedBottom => PlacementChoice::Bottom,
                     Placement::Floating { .. } => PlacementChoice::Floating,
                 };
                 let changed = segmented(
@@ -81,14 +86,16 @@ impl SettingsWindow {
                     "Placement",
                     &mut choice,
                     &[
-                        (PlacementChoice::Docked, "Docked"),
+                        (PlacementChoice::Top, "Top"),
+                        (PlacementChoice::Bottom, "Bottom"),
                         (PlacementChoice::Floating, "Floating"),
                     ],
                 )
                 .changed();
                 if changed {
                     prefs.placement = match choice {
-                        PlacementChoice::Docked => Placement::DockedBottom,
+                        PlacementChoice::Top => Placement::DockedTop,
+                        PlacementChoice::Bottom => Placement::DockedBottom,
                         PlacementChoice::Floating => Placement::Floating { position: None },
                     };
                 }
@@ -115,7 +122,12 @@ impl SettingsWindow {
                             Some(choice) => device.monitors.iter().position(|m| m.id == choice.id),
                             None => device.monitors.iter().position(|m| m.primary),
                         };
-                        if let Some(index) = display_picker(ui, tokens, &tiles, chosen) {
+                        let edge = if prefs.placement == Placement::DockedTop {
+                            Edge::Top
+                        } else {
+                            Edge::Bottom
+                        };
+                        if let Some(index) = display_picker(ui, tokens, &tiles, chosen, edge) {
                             let monitor = &device.monitors[index];
                             prefs.monitor = (!monitor.primary).then(|| MonitorChoice {
                                 id: monitor.id.clone(),
@@ -146,6 +158,13 @@ impl SettingsWindow {
                     }
                 });
             }
+            g.row(
+                "Animation",
+                Some("Turns the in-progress mark while a build runs. Off, nothing on the strip moves."),
+                |ui| {
+                    toggle(ui, tokens, &mut prefs.animation, "Animation");
+                },
+            );
             g.label("Startup");
             g.row(
                 "Start at login",

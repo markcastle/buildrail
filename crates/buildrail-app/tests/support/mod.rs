@@ -312,7 +312,15 @@ impl Fixture {
     /// A machine with `drafts` pinned and connections `work` (GitHub) and
     /// `cf` (Cloudflare) set up with stored tokens.
     pub fn with_profile(drafts: &[WatchDraft]) -> Self {
-        let fixture = Self::new();
+        Self::seeded(Self::new(), drafts)
+    }
+
+    /// Like [`Self::with_profile`] without a runtime of its own.
+    pub fn with_profile_for_async(drafts: &[WatchDraft]) -> Self {
+        Self::seeded(Self::for_async(), drafts)
+    }
+
+    fn seeded(fixture: Self, drafts: &[WatchDraft]) -> Self {
         fixture
             .paths
             .profile_store()
@@ -342,11 +350,17 @@ impl Fixture {
 
     /// Starts a controller and wraps it in the UI (animation off).
     pub fn ui(&self) -> BuildRailUi {
+        self.ui_on(self.handle(), fast_policy())
+    }
+
+    /// Like [`Self::ui`] on `runtime` with `policy` (async tests pass
+    /// their own runtime and the real cadence).
+    pub fn ui_on(&self, runtime: tokio::runtime::Handle, policy: RefreshPolicy) -> BuildRailUi {
         let controller = AppController::start(
             self.world.services(&self.paths),
             Arc::new(self.paths.snapshot_cache()),
-            fast_policy(),
-            self.handle(),
+            policy,
+            runtime,
         );
         let mut ui = BuildRailUi::new(controller);
         ui.set_animate(false);

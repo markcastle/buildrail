@@ -6,8 +6,11 @@
 #![warn(clippy::undocumented_unsafe_blocks)]
 
 pub(crate) mod appbar;
+pub(crate) mod console;
 pub(crate) mod fullscreen;
+pub(crate) mod instance;
 pub(crate) mod monitors;
+pub(crate) mod motion;
 pub(crate) mod registry;
 
 use windows_sys::Win32::Foundation::{HWND, RECT};
@@ -23,15 +26,6 @@ fn last_error() -> i64 {
 
 fn hwnd_from(raw: isize) -> HWND {
     raw as HWND
-}
-
-fn to_rect(rect: &PhysicalRect) -> RECT {
-    RECT {
-        left: rect.x,
-        top: rect.y,
-        right: rect.right(),
-        bottom: rect.bottom(),
-    }
 }
 
 /// Converts a Win32 rect. An inverted rect (the shell can return one from

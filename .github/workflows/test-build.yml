@@ -1,0 +1,285 @@
+name: Test build
+
+# Every pull request gets a Windows build to try before it is merged: open
+# the run from the pull request's checks, scroll to Artifacts, and download
+# the zip. It holds buildrail.exe, a "Try the demo.cmd" to double-click, the
+# README and the changelog. The "Run workflow" button does the same for any
+# branch.
+#
+# This is a try-it build, not a release: it has no update signing key, so it
+# never updates itself, and nothing is published.
+#
+# The smoke run then starts that build's demo on a real Windows desktop,
+# takes a screenshot, closes it, and keeps the screenshot and BuildRail's
+# log as an artifact ("smoke-run"), so docking can be seen and read without
+# a person at a Windows machine. It fails only if the app died early or
+# panicked; a missing screenshot is a warning.
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: test-build-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  windows:
+    name: Windows test build
+    runs-on: windows-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build --release --locked -p buildrail-app
+
+      - name: Package
+        id: package
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          if [ -n "$PR_NUMBER" ]; then label="pr$PR_NUMBER-${HEAD_SHA:0:7}"; else label="${GITHUB_REF_NAME//\//-}-${HEAD_SHA:0:7}"; fi
+          name="buildrail-$label-windows-x86_64"
+          mkdir "$name"
+          cp target/release/buildrail.exe README.md CHANGELOG.md "$name/"
+          printf '@echo off\r\nstart "" "%%~dp0buildrail.exe" --demo\r\n' > "$name/Try the demo.cmd"
+          7z a -tzip "$name.zip" "$name" > /dev/null
+          echo "zip=$name.zip" >> "$GITHUB_OUTPUT"
+          ls -l "$name" "$name.zip"
+
+      # The program on its own, for the smoke run below; kept a day.
+      - uses: actions/upload-artifact@v7
+        with:
+          name: smoke-run-program
+          path: target/release/buildrail.exe
+          if-no-files-found: error
+          retention-days: 1
+
+      # Uploaded as the zip itself (archive: false), so the download is the
+      # zip and not a zip inside a zip.
+      - uses: actions/upload-artifact@v7
+        with:
+          path: ${{ steps.package.outputs.zip }}
+          archive: false
+          if-no-files-found: error
+          retention-days: 14
+
+  smoke:
+    name: Windows smoke run
+    needs: windows
+    runs-on: windows-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      SMOKE_DIR: ${{ github.workspace }}\buildrail-smoke
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: smoke-run-program
+          path: program
+
+      # GitHub's Windows machines have no graphics card, and Windows' built-in
+      # software OpenGL stops at version 1.1; BuildRail needs 2.0. Put Mesa's
+      # software OpenGL beside the exe, for this test run only. It is never
+      # part of a download.
+      - name: Add software OpenGL for the test machine
+        uses: ssciwr/setup-mesa-dist-win@v3
+
+      # Start the demo with its files in a scratch folder, give it ten
+      # seconds to dock, read where its window really is (GetWindowRect),
+      # photograph the whole desktop, then ask it to close (WM_CLOSE, as the
+      # taskbar would) so the log also shows the screen edge being given
+      # back.
+      - name: Run the demo and take a screenshot
+        id: run
+        run: |
+          New-Item -ItemType Directory -Force -Path $env:SMOKE_DIR | Out-Null
+          $env:BUILDRAIL_CONFIG_DIR = $env:SMOKE_DIR
+          $env:RUST_LOG = 'warn,buildrail_app=debug,buildrail_platform=debug'
+          $out = Join-Path $env:SMOKE_DIR 'stdout.txt'
+          $err = Join-Path $env:SMOKE_DIR 'stderr.txt'
+          $p = Start-Process -FilePath 'program\buildrail.exe' -ArgumentList '--demo' -PassThru `
+            -RedirectStandardOutput $out -RedirectStandardError $err
+          Start-Sleep -Seconds 10
+          $alive = -not $p.HasExited
+
+          Add-Type -TypeDefinition @"
+          using System;
+          using System.Collections.Generic;
+          using System.Runtime.InteropServices;
+          using System.Text;
+          public static class SmokeWindows {
+              [StructLayout(LayoutKind.Sequential)]
+              public struct RECT { public int Left, Top, Right, Bottom; }
+              public delegate bool EnumProc(IntPtr hwnd, IntPtr data);
+              [DllImport("user32.dll")] static extern bool EnumWindows(EnumProc proc, IntPtr data);
+              [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint pid);
+              [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr hwnd);
+              [DllImport("user32.dll")] static extern bool GetWindowRect(IntPtr hwnd, out RECT rect);
+              [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetWindowText(IntPtr hwnd, StringBuilder text, int max);
+              // "title|x|y|width|height" for each visible top-level window of the process.
+              public static List<string> Of(uint pid) {
+                  var found = new List<string>();
+                  EnumWindows(delegate (IntPtr hwnd, IntPtr data) {
+                      uint owner;
+                      GetWindowThreadProcessId(hwnd, out owner);
+                      if (owner == pid && IsWindowVisible(hwnd)) {
+                          RECT r;
+                          GetWindowRect(hwnd, out r);
+                          var title = new StringBuilder(256);
+                          GetWindowText(hwnd, title, 256);
+                          found.Add(String.Format("{0}|{1}|{2}|{3}|{4}", title, r.Left, r.Top, r.Right - r.Left, r.Bottom - r.Top));
+                      }
+                      return true;
+                  }, IntPtr.Zero);
+                  return found;
+              }
+          }
+          "@
+          $strip = $null
+          if ($alive) {
+            foreach ($entry in [SmokeWindows]::Of([uint32]$p.Id)) {
+              $f = $entry.Split('|')
+              Write-Output "Window '$($f[0])': $($f[3])x$($f[4]) at ($($f[1]), $($f[2]))"
+              if ($f[0] -eq 'BuildRail') {
+                $strip = @{ X = [int]$f[1]; Y = [int]$f[2]; W = [int]$f[3]; H = [int]$f[4] }
+              }
+            }
+          }
+          if ($strip) {
+            "window=$($strip.W)x$($strip.H) at ($($strip.X), $($strip.Y))" >> $env:GITHUB_OUTPUT
+          } else {
+            Write-Output "::warning::No visible BuildRail window found"
+          }
+
+          try {
+            Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+            $screen = [System.Windows.Forms.SystemInformation]::VirtualScreen
+            $bitmap = New-Object System.Drawing.Bitmap $screen.Width, $screen.Height
+            $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+            $graphics.CopyFromScreen($screen.Left, $screen.Top, 0, 0, $bitmap.Size)
+            $bitmap.Save((Join-Path $env:SMOKE_DIR 'screenshot.png'), [System.Drawing.Imaging.ImageFormat]::Png)
+            Write-Output "Screenshot: $($screen.Width)x$($screen.Height) at ($($screen.Left), $($screen.Top))"
+            # Crude look at the pixels: the strip's middle row against the
+            # row just outside it (above, or below a strip at the top).
+            if ($strip) {
+              $average = {
+                param($y)
+                $r = 0; $g = 0; $b = 0; $n = 0
+                for ($x = $strip.X; $x -lt $strip.X + $strip.W; $x += 8) {
+                  $px = $x - $screen.Left; $py = $y - $screen.Top
+                  if ($px -ge 0 -and $px -lt $bitmap.Width -and $py -ge 0 -and $py -lt $bitmap.Height) {
+                    $c = $bitmap.GetPixel($px, $py); $r += $c.R; $g += $c.G; $b += $c.B; $n++
+                  }
+                }
+                if ($n -eq 0) { return $null }
+                return @([int]($r / $n), [int]($g / $n), [int]($b / $n))
+              }
+              $inside = & $average ($strip.Y + [int]($strip.H / 2))
+              $outsideY = if ($strip.Y -gt $screen.Top) { $strip.Y - 1 } else { $strip.Y + $strip.H }
+              $outside = & $average $outsideY
+              if ($inside -and $outside) {
+                $differ = ($inside -join ',') -ne ($outside -join ',')
+                Write-Output "Strip's middle row averages rgb($($inside -join ', ')); the row at y=$outsideY averages rgb($($outside -join ', ')): $(if ($differ) { 'they differ, so something is drawn there' } else { 'the same' })"
+              }
+            }
+            $graphics.Dispose()
+            $bitmap.Dispose()
+          } catch {
+            Write-Output "::warning::No screenshot of the desktop: $_"
+          }
+
+          if ($alive) {
+            taskkill /PID $p.Id | Out-Null
+            if (-not $p.WaitForExit(10000)) {
+              Write-Output "::warning::BuildRail did not close within 10 s of being asked; stopping it"
+              Stop-Process -Id $p.Id -Force
+            }
+          } else {
+            Write-Output "::error::buildrail.exe exited within 10 seconds (exit code $($p.ExitCode))"
+          }
+          "alive=$alive" >> $env:GITHUB_OUTPUT
+
+      # Fails when the app died early or panicked, when the log never
+      # confirmed the strip on its reserved edge, or when the last dock
+      # check says it is not there.
+      - name: Check the log
+        env:
+          WINDOW_RECT: ${{ steps.run.outputs.window }}
+          ALIVE: ${{ steps.run.outputs.alive }}
+        run: |
+          $logs = Get-ChildItem -Path (Join-Path $env:SMOKE_DIR 'logs') -Filter '*.log' -ErrorAction SilentlyContinue
+          if (-not $logs) { Write-Output "::warning::BuildRail wrote no log file" }
+          foreach ($file in $logs) {
+            Write-Output "===== $($file.FullName)"
+            Get-Content $file.FullName
+          }
+          $log = ($logs | ForEach-Object { Get-Content $_.FullName -Raw }) -join "`n"
+          # stdout and stderr repeat the log (the app logs to both); show
+          # only what the log may not have, such as a panic report.
+          $streams = @('stdout.txt', 'stderr.txt') | ForEach-Object { Join-Path $env:SMOKE_DIR $_ } | Where-Object { Test-Path $_ }
+          $streamText = ($streams | ForEach-Object { Get-Content $_ -Raw }) -join "`n"
+          foreach ($file in $streams) {
+            $lines = @(Get-Content $file)
+            Write-Output "===== $file ($($lines.Count) lines, the same as the log; only panics and errors shown)"
+            $lines | Where-Object { $_ -match 'panicked|ERROR|error:' }
+          }
+          if (-not $logs) { $log = $streamText }
+
+          $failed = $false
+          if (($log + "`n" + $streamText) -match 'panicked at|BuildRail crashed') {
+            Write-Output "::error::BuildRail panicked during the smoke run (see the log above)"
+            $failed = $true
+          }
+          if ($env:ALIVE -ne 'True') { $failed = $true }
+
+          $reserved = [regex]::Matches($log, 'reserved=(\d+x\d+ at \(-?\d+, -?\d+\))') | Select-Object -Last 1
+          $reservedRect = if ($reserved) { $reserved.Groups[1].Value } else { 'none in the log' }
+          $windowRect = if ($env:WINDOW_RECT) { $env:WINDOW_RECT } else { 'not found' }
+          Write-Output "Reserved rect (last in the log): $reservedRect"
+          Write-Output "Window rect (GetWindowRect):     $windowRect"
+          if ($reserved -and $env:WINDOW_RECT -and $reservedRect -ne $windowRect) {
+            Write-Output "::warning::The strip's window ($windowRect) is not on the reserved rect ($reservedRect)"
+          }
+          if ($log -notmatch 'the strip is on its reserved edge') {
+            Write-Output "::error::The log never confirms the strip on its reserved edge"
+            $failed = $true
+          }
+          $last = [regex]::Matches($log, '(?m)^.*(the strip is on its reserved edge|the strip is not on its reserved edge yet|dock checked).*$') | Select-Object -Last 1
+          if ($last) {
+            Write-Output "Last dock check: $($last.Value)"
+            if ($last.Value -match 'not on its reserved edge yet|on_rect=false') {
+              Write-Output "::error::The last dock check says the strip is not on its reserved edge"
+              $failed = $true
+            }
+          }
+          if ($failed) { exit 1 }
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: smoke-run
+          path: |
+            ${{ env.SMOKE_DIR }}\screenshot.png
+            ${{ env.SMOKE_DIR }}\logs
+            ${{ env.SMOKE_DIR }}\stdout.txt
+            ${{ env.SMOKE_DIR }}\stderr.txt
+          if-no-files-found: warn
+          retention-days: 14
