@@ -95,6 +95,22 @@ jobs:
           name: smoke-run-program
           path: program
 
+      # GitHub's Windows machines have no graphics card, and Windows' built-in
+      # software OpenGL stops at version 1.1; BuildRail needs 2.0. Put Mesa's
+      # software OpenGL beside the exe, for this test run only. It is never
+      # part of a download.
+      - name: Add software OpenGL for the test machine
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MESA_VERSION: "26.2.7"
+        run: |
+          gh release download "$MESA_VERSION" --repo pal1000/mesa-dist-win \
+            --pattern "mesa3d-$MESA_VERSION-release-msvc.7z" --output mesa.7z
+          7z x mesa.7z -omesa "x64/opengl32.dll" "x64/libgallium_wgl.dll" "x64/libglapi.dll" > /dev/null || true
+          ls -l mesa/x64
+          cp mesa/x64/*.dll program/
+
       # Start the demo with its files in a scratch folder, give it ten
       # seconds to dock, photograph the whole desktop, then ask it to close
       # (WM_CLOSE, as the taskbar would) so the log also shows the screen
