@@ -7,6 +7,8 @@
 #
 #   1. Asks GitHub for the latest release and picks the Windows download by
 #      the end of its name (never the full name, which carries a version).
+#      Every release has one; if the latest ever did not, it installs the
+#      newest published release that does, and says so.
 #   2. Downloads it and the release's SHA256SUMS.txt, and refuses to go on
 #      unless the download's SHA-256 matches. A truncated or tampered
 #      download is never installed.
@@ -55,8 +57,22 @@ try {
 $tag = $release.tag_name
 
 $zip = $release.assets | Where-Object { $_.name -like "*-$target.zip" } | Select-Object -First 1
+if (-not $zip) {
+    # Every release is built for Windows, so this should not happen; if it
+    # does, install the newest published release that has a Windows build.
+    Write-Host "The latest release, $tag, has no Windows download. Looking for the newest release that has one..."
+    try {
+        $all = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/releases?per_page=100" -Headers $headers
+    } catch {
+        throw "BuildRail was not installed: could not list the releases of $repo. ($($_.Exception.Message))"
+    }
+    $release = $all | Where-Object { -not $_.draft -and -not $_.prerelease -and ($_.assets | Where-Object { $_.name -like "*-$target.zip" }) } | Select-Object -First 1
+    if (-not $release) { throw 'BuildRail was not installed: no published release has a Windows download.' }
+    $tag = $release.tag_name
+    Write-Host "Installing BuildRail $tag, the newest release with a Windows download."
+    $zip = $release.assets | Where-Object { $_.name -like "*-$target.zip" } | Select-Object -First 1
+}
 $sums = $release.assets | Where-Object { $_.name -eq 'SHA256SUMS.txt' } | Select-Object -First 1
-if (-not $zip) { throw "BuildRail was not installed: release $tag has no Windows download." }
 if (-not $sums) { throw "BuildRail was not installed: release $tag has no SHA256SUMS.txt, so its download cannot be checked." }
 
 $work = Join-Path ([IO.Path]::GetTempPath()) ("buildrail-install-" + [Guid]::NewGuid().ToString('N'))

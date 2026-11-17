@@ -23,7 +23,11 @@ name: Roll back
 #    why (the lines that were there describe work this takes off main).
 # 3. Calls the Release workflow for the next patch number. CI is not checked:
 #    the code was released before, and a commit pushed by a workflow does
-#    not start CI anyway.
+#    not start CI anyway. It is built for every platform if any withdrawn
+#    release had macOS or Linux builds, otherwise for Windows only. With
+#    every platform, the macOS tests still run first; if they fail, nothing
+#    is tagged and the rollback commit is already on main, so run Release by
+#    hand without "Also build macOS and Linux".
 #
 # Work that landed after the good version is gone from main afterwards, not
 # lost: revert the "Roll back to" commit to bring it back (changelog lines
@@ -61,6 +65,7 @@ jobs:
       cancel-in-progress: false
     outputs:
       next: ${{ steps.versions.outputs.next }}
+      all_platforms: ${{ steps.withdraw.outputs.all_platforms }}
       commit: ${{ steps.restore.outputs.commit }}
     steps:
       - uses: actions/checkout@v7
@@ -116,14 +121,23 @@ jobs:
           # restore below replaces the tree anyway.
           git checkout -- .
 
+      # Also notes whether any withdrawn release carried macOS or Linux
+      # builds: if one did, copies on those systems may be on the bad
+      # version, so the roll-forward is built for every platform too. A
+      # rollback of Windows-only releases stays Windows-only.
       - name: Withdraw the releases newer than ${{ inputs.to }}
+        id: withdraw
         env:
           GH_TOKEN: ${{ github.token }}
           TO: ${{ inputs.to }}
         run: |
+          all_platforms=false
           for tag in $(git tag -l 'v*' | sort -V); do
             v="${tag#v}"
             [ "$(printf '%s\n%s\n' "$TO" "$v" | sort -V | tail -1)" = "$v" ] && [ "$v" != "$TO" ] || continue
+            if gh release view "$tag" --json assets --jq '.assets[].name' 2>/dev/null | grep -qE -- '-(macos|linux)-'; then
+              all_platforms=true
+            fi
             if gh release edit "$tag" --prerelease --latest=false >/dev/null 2>&1; then
               echo "Withdrew $tag (now a pre-release)."
               echo "- Withdrew $tag." >> "$GITHUB_STEP_SUMMARY"
@@ -132,6 +146,12 @@ jobs:
             fi
           done
           echo "Latest is now $(gh release view --json tagName --jq .tagName)."
+          echo "all_platforms=$all_platforms" >> "$GITHUB_OUTPUT"
+          if [ "$all_platforms" = "true" ]; then
+            echo "A withdrawn release had macOS or Linux builds, so the roll-forward is built for every platform." | tee -a "$GITHUB_STEP_SUMMARY"
+          else
+            echo "The withdrawn releases were Windows-only, so the roll-forward is too." | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
 
       - name: Put the code of ${{ inputs.to }} back on main
         id: restore
@@ -163,4 +183,5 @@ jobs:
       version: ${{ needs.restore.outputs.next }}
       skip_ci_check: true
       commit: ${{ needs.restore.outputs.commit }}
+      all_platforms: ${{ needs.restore.outputs.all_platforms == 'true' }}
     secrets: inherit

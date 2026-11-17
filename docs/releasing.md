@@ -24,7 +24,7 @@ Write what changed into `CHANGELOG.md` as the work lands. That one habit drives 
 3. Someone presses **Release**.
 4. The workflow works out the version, stamps the changelog, sets the version in `Cargo.toml` and `Cargo.lock`, commits `Release vX.Y.Z`, tags it, and pushes both.
 5. It creates the GitHub release as a **draft** straight away, with the changelog section as its notes.
-6. Four runners build BuildRail for Windows, Apple silicon Macs, Intel Macs and Linux, each from the tag, and upload two files each to the draft.
+6. A Windows runner builds BuildRail from the tag and uploads two files to the draft. For a major release with **Also build macOS and Linux** ticked, three more runners do the same for Apple silicon Macs, Intel Macs and Linux (and the tests run on macOS first, before anything is tagged).
 7. Once every build has succeeded, it signs the update files into `latest.json`, writes `SHA256SUMS.txt`, checks that everything is on the draft and matches, and **publishes** it. GitHub now calls it "latest".
 8. Running copies of BuildRail find `latest.json` within the hour and see a higher version. They offer it on the strip and install it when the person says so (or by themselves at a quiet moment, for people who turned on Update automatically), checking its signature first.
 
@@ -34,7 +34,9 @@ It takes about twenty minutes, nearly all of it building.
 
 **While working:** add a line under `## [Unreleased]` in `CHANGELOG.md`, in the same pull request as the change. A check on the pull request asks for it when the app's code changed. If nobody using BuildRail would notice the change, add the label `no-changelog` to the pull request instead.
 
-**To release:** open the repository's **Actions** tab, pick **Release**, press **Run workflow**, leave the version blank, and press the green **Run workflow** button. The run's page says which number it chose and why.
+**To release:** open the repository's **Actions** tab, pick **Release**, press **Run workflow**, leave the version blank, and press the green **Run workflow** button. The run's page says which number it chose, why, and which platforms it covers.
+
+**Windows every time, macOS and Linux for major releases.** While BuildRail is moving fast, a release is built for Windows only. For a major release, tick **Also build macOS and Linux** as well; see [Platforms](#platforms).
 
 **To check it worked:** the release page lists the downloads, `SHA256SUMS.txt` and `latest.json`, and is marked "Latest".
 
@@ -84,7 +86,16 @@ Tick **Rehearse** in the Release form to run everything except the push, the dra
 - see the exact release notes;
 - try a change to the Release workflow itself before merging it.
 
-A rehearsal also reports whether CI passed on the commit, as a warning rather than a stop. The run's page shows the version, the reason, the signing state and the notes.
+A rehearsal also reports whether CI passed on the commit, as a warning rather than a stop. The run's page shows the version, the reason, the platforms, the signing state and the notes. Rehearsing with **Also build macOS and Linux** ticked also runs the tests on macOS.
+
+## Platforms
+
+Every release is built for Windows. macOS (Apple silicon and Intel) and Linux are built only when **Also build macOS and Linux** is ticked, which is meant for major releases while BuildRail changes quickly.
+
+- **Testing.** CI on pull requests and on `main` tests on Windows and Linux. macOS is tested by the release itself: with the box ticked, the Release run tests the whole workspace on macOS before it decides the version, and if that fails nothing is tagged or pushed. To test on macOS at any other time, run the CI workflow from the Actions tab with **Also test on macOS** ticked.
+- **What installed copies do.** A macOS or Linux copy reads the same `latest.json` as everyone else. When the newest release has no build for it, it reports "Up to date." and checks again later; it is not an error. Its log notes at debug level that the release had no build for its platform.
+- **What the one-line install does.** On macOS and Linux it installs the newest published release that has a build for that system, and says so when that is not the latest.
+- **Roll back** builds for every platform if any release it withdraws had macOS or Linux builds, and for Windows only otherwise.
 
 ## Roll back
 
@@ -94,7 +105,7 @@ Open Actions, pick **Roll back**, and give the last good version (such as `0.4.2
 
 1. **Withdraws every release newer than the good one** by marking it a pre-release. GitHub's "latest" skips pre-releases, so straight away the update feed and the one-line installers hand out the good version again, and copies that had not updated yet are no longer offered the bad one.
 2. **Puts the good version's code back on `main`** as one commit. The release tooling stays as it is today (`.github`, `crates/xtask`, `CHANGELOG.md`, `scripts`, this page), since that is what is running. Unreleased in the changelog becomes one line saying what happened and why.
-3. **Releases it** as the next patch number (0.5.1 in the example), so copies that took 0.5.0 move to the good code too. CI is not checked, because that code was released before.
+3. **Releases it** as the next patch number (0.5.1 in the example), so copies that took 0.5.0 move to the good code too. CI is not checked, because that code was released before. It is built for every platform if any withdrawn release had macOS or Linux builds, otherwise for Windows only. If the macOS tests then fail, nothing is tagged; the rollback commit is already on `main`, so run Release by hand without the macOS and Linux box.
 
 Work that landed after the good version is gone from `main` afterwards, but not lost: revert the "Roll back to" commit to bring it back, changelog lines included, fix it, and release again.
 
@@ -152,7 +163,7 @@ If the secret is deleted after releases have been signed, the next release stops
 
 ## What a release contains
 
-For each platform, a download for people and an update file for the app:
+For each platform built (Windows always; the others only for major releases), a download for people and an update file for the app:
 
 | Platform | Download | Update file |
 | --- | --- | --- |
@@ -246,6 +257,10 @@ Most of these cost a failed or confusing release somewhere before they were unde
 | A rollback strands everyone on old code | The good version predates self-update | The rollback refuses such a version |
 | The next number is wrong when worked out from a laptop | The checkout had not fetched tags made on GitHub | The release command fetches tags first |
 | CI never ran on the commit being released | Commits pushed by the workflow do not trigger CI | Check CI on the commit a person merged; skip the check for a rollback |
+| A macOS build is released that no CI ever tested | Per-commit CI covers Windows and Linux only | A release with macOS and Linux runs the tests on macOS before it tags anything; a failure leaves nothing behind |
+| Every Mac and Linux copy reports "Update check failed" each hour | Most releases have no build for them | A release without this platform's build is "Up to date", not an error, and is checked before the signing key |
+| The installer on a Mac or Linux says there is nothing to download | The latest release is Windows-only | It installs the newest published release that has a build for that system, skipping drafts and pre-releases |
+| The publish job waits for files that were never built | The expected list was fixed at four platforms | Prepare chooses the platforms once; the build matrix, `latest.json`, the checksums and the final check all follow that list |
 | The release stops at "the lock file needs to be updated" | `Cargo.lock` on `main` disagrees with `Cargo.toml` | Every build and the release command use `--locked`, so it is caught before anything is pushed. Commit an up-to-date `Cargo.lock` |
 | Installed copies stop updating after the key secret was replaced | Each copy only trusts the key it was built with | The release compares key ids with the latest `latest.json` and stops unless the change is ticked as deliberate |
 | Installed copies stop hearing about updates | The key secret was deleted, so the release had no `latest.json` | The release stops if the latest release was signed and the secret is now missing |
@@ -265,6 +280,7 @@ Most of these cost a failed or confusing release somewhere before they were unde
 - **Operating-system code signing.** A Windows certificate and an Apple Developer ID with notarisation, so a hand-downloaded copy does not meet SmartScreen or Gatekeeper. They would go in as repository secrets used by the build job.
 - **A macOS app bundle.** On macOS BuildRail is a single program in `~/.local/bin`, not a `.app` in Applications, so it has no Dock or Launchpad icon.
 - **A staged rollout.** Every running copy is offered a release as soon as it is published. There is no way to offer it to a few first.
+- **macOS and Linux with every release.** They are built only for major releases for now.
 - **More platforms.** No builds for Windows on ARM (the x64 build runs under emulation) or Linux on ARM.
 - **Build provenance.** GitHub's artifact attestations would let anyone check a download was built by this workflow from this source.
 - **An uninstall script.** Removing BuildRail is deleting the program and, on Windows, the Start menu entry.

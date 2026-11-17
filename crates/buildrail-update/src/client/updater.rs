@@ -879,7 +879,11 @@ pub(crate) mod tests {
         // Most releases are Windows-only; a Linux copy must stay calm.
         let (m, _gz) = good_release();
         let windows_only = m.to_json().replace(TARGET, "windows-x86_64");
-        let rig = rig_with("0.2.0", StaticFeed::new(windows_only.clone()), Some(&key_a()));
+        let rig = rig_with(
+            "0.2.0",
+            StaticFeed::new(windows_only.clone()),
+            Some(&key_a()),
+        );
         let status = rig.updater.check().await;
         assert_eq!(
             status,
@@ -897,7 +901,10 @@ pub(crate) mod tests {
         // has nothing for this platform is not this copy's concern either.
         let other_key = windows_only.replace(&key_a().public_key().key_id(), "0000000000000000");
         let rig = rig_with("0.2.0", StaticFeed::new(other_key), Some(&key_a()));
-        assert!(matches!(rig.updater.check().await, UpdateStatus::UpToDate { .. }));
+        assert!(matches!(
+            rig.updater.check().await,
+            UpdateStatus::UpToDate { .. }
+        ));
         // And the schedule treats it like any other quiet answer.
         let mut schedule = crate::client::UpdateSchedule::new();
         schedule.record(std::time::Duration::ZERO, &status);

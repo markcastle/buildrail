@@ -8,6 +8,9 @@
 #
 #   1. Asks GitHub for the latest release and picks this machine's download
 #      by the end of its name (never the full name, which carries a version).
+#      macOS and Linux are built only for major releases, so when the latest
+#      release has nothing for this machine it installs the newest release
+#      that does, and says so.
 #   2. Downloads it and the release's SHA256SUMS.txt, and refuses to go on
 #      unless the download's SHA-256 matches. A truncated or tampered
 #      download is never installed.
@@ -66,27 +69,62 @@ download() {
   fi
 }
 
+# Reads a GitHub API address, with the token when there is one.
+api() {
+  if [ -n "${GITHUB_TOKEN:-}" ]; then
+    curl -fsSL -H "Authorization: Bearer $GITHUB_TOKEN" "$1"
+  else
+    curl -fsSL "$1"
+  fi
+}
+
+# One line per file on each release in GitHub's answer (one release or a
+# list): "<tag> <draft> <prerelease> <file name> <API address>". Within a
+# release GitHub lists the tag and flags before the files, and each file's
+# API address just before its name.
+files_of() {
+  printf '%s' "$1" | tr -d '\n' |
+    grep -oE '"tag_name": *"[^"]*"|"(draft|prerelease)": *(true|false)|"url": *"https://api\.github\.com/repos/[^"]+/releases/assets/[0-9]+"|"name": *"[^"]*"' |
+    awk -F '"' '
+      /^"tag_name"/ { tag = $4; draft = "false"; pre = "false"; url = ""; next }
+      /^"draft"/ { draft = ($0 ~ /true/) ? "true" : "false"; next }
+      /^"prerelease"/ { pre = ($0 ~ /true/) ? "true" : "false"; next }
+      /^"url"/ { url = $4; next }
+      url != "" { print tag, draft, pre, $4, url; url = "" }'
+}
+
+# The tag of the first published release, in GitHub's order (newest
+# first), that has a download for this machine.
+first_with_build() {
+  printf '%s\n' "$1" | awk -v want="-$target.tar.gz" '
+    $2 == "false" && $3 == "false" && length($4) > length(want) &&
+      substr($4, length($4) - length(want) + 1) == want { print $1; exit }'
+}
+
 say "Looking up the latest BuildRail release..."
-api="https://api.github.com/repos/$REPO/releases/latest"
-if [ -n "${GITHUB_TOKEN:-}" ]; then
-  json=$(curl -fsSL -H "Authorization: Bearer $GITHUB_TOKEN" "$api") || fail "could not read the latest release of $REPO. Check GITHUB_TOKEN."
-else
-  json=$(curl -fsSL "$api") || fail "could not read the latest release of $REPO. If the repository is private, set GITHUB_TOKEN first."
+json=$(api "https://api.github.com/repos/$REPO/releases/latest") ||
+  fail "could not read the latest release of $REPO. If the repository is private, set GITHUB_TOKEN first."
+files=$(files_of "$json")
+latest=$(printf '%s' "$json" | tr -d '\n' | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p')
+tag=$(first_with_build "$files")
+
+if [ -z "$tag" ]; then
+  # macOS and Linux are built only for major releases, so the latest
+  # release is often Windows-only. Install the newest one built for here.
+  say "The latest release, ${latest:-without a tag}, has no build for $target: macOS and Linux builds come with major releases."
+  say "Looking for the newest release that has one..."
+  json=$(api "https://api.github.com/repos/$REPO/releases?per_page=100") ||
+    fail "could not list the releases of $REPO."
+  files=$(files_of "$json")
+  tag=$(first_with_build "$files")
+  [ -n "$tag" ] || fail "no published release has a build for $target yet."
+  say "Installing BuildRail $tag, the newest release with a build for $target."
 fi
-json=$(printf '%s' "$json" | tr -d '\n')
 
-tag=$(printf '%s' "$json" | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p')
-[ -n "$tag" ] || fail "the latest release has no tag."
-
-# One line per file on the release: "<name> <API address>". Each asset's API
-# address comes just before its name in GitHub's answer.
-assets=$(printf '%s' "$json" |
-  grep -oE '"url": *"https://api\.github\.com/repos/[^"]+/releases/assets/[0-9]+"|"name": *"[^"]*"' |
-  awk -F '"' '/^"url"/ { url = $4; next } url != "" { print $4 " " url; url = "" }')
-
-pick() { printf '%s\n' "$assets" | grep -E "$1" | head -n 1; }
-archive=$(pick "^[^ ]*-$target\\.tar\\.gz ")
-sums=$(pick "^SHA256SUMS\\.txt ")
+# "<file name> <API address>" for one file of the chosen release.
+pick() { printf '%s\n' "$files" | awk -v tag="$tag" -v name="$1" '$1 == tag && $4 ~ name { print $4, $5; exit }'; }
+archive=$(pick "-${target}[.]tar[.]gz\$")
+sums=$(pick "^SHA256SUMS[.]txt\$")
 [ -n "$archive" ] || fail "release $tag has no download for $target."
 [ -n "$sums" ] || fail "release $tag has no SHA256SUMS.txt, so its download cannot be checked."
 

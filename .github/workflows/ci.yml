@@ -1,12 +1,25 @@
 name: CI
 
+# Pull requests and pushes test on Linux and Windows. macOS is built only
+# for major releases, so it is tested only then: the Release workflow runs
+# the tests on macOS itself before it tags a release that includes macOS.
+# To test every platform on demand, run this workflow from the Actions tab
+# with "Also test on macOS" ticked.
+
 on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
+    inputs:
+      all_platforms:
+        description: 'Also test on macOS'
+        type: boolean
+        default: false
 
 concurrency:
-  group: ci-${{ github.ref }}
+  # By event too, so an on-demand all-platform run never cancels the push run.
+  group: ci-${{ github.ref }}-${{ github.event_name }}
   cancel-in-progress: true
 
 env:
@@ -20,7 +33,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        os: ${{ fromJSON(inputs.all_platforms && '["ubuntu-latest", "windows-latest", "macos-latest"]' || '["ubuntu-latest", "windows-latest"]') }}
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -36,7 +49,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        os: ${{ fromJSON(inputs.all_platforms && '["ubuntu-latest", "windows-latest", "macos-latest"]' || '["ubuntu-latest", "windows-latest"]') }}
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable

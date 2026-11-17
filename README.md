@@ -8,7 +8,7 @@ It talks to GitHub and Cloudflare directly with a read-only token that you suppl
 
 ## Installing
 
-Every release has BuildRail for Windows, for Macs with Apple silicon or Intel, and for 64-bit Linux. One line installs it for you alone, with no administrator prompt, checks the download against the release's checksums, and starts it. Run the same line again to update.
+Every release has BuildRail for Windows. Builds for Macs (Apple silicon and Intel) and 64-bit Linux are published only with major releases, so they can be a few versions behind Windows. One line installs it for you alone, with no administrator prompt, checks the download against the release's checksums, and starts it. Run the same line again to update.
 
 Windows, in PowerShell:
 
@@ -21,6 +21,8 @@ macOS and Linux:
 ```bash
 curl -fsSL https://raw.githubusercontent.com/markcastle/buildrail/main/scripts/install.sh | sh
 ```
+
+On macOS and Linux it installs the newest release that has a build for your system, and says which one if that is not the latest.
 
 You can also download a release from the [releases page](https://github.com/markcastle/buildrail/releases) and run it from wherever you unpack it.
 
@@ -109,6 +111,8 @@ Monitor, scale, theme, placement, animation, start-at-login and automatic update
 | Linux, Wayland | Compact movable window. A winit window cannot become a layer-shell surface yet. | Not run |
 | macOS | Compact movable window. macOS has no public way to reserve a screen edge. | Type-checked only. Never run. |
 
+Windows builds come with every release. macOS and Linux builds are published only with major releases and may lag behind; a copy on those systems treats a release without its build as nothing to install and says "Up to date."
+
 The strip hides while a fullscreen app is on its monitor (Windows and X11), never takes keyboard focus on its own, and follows the system light or dark theme unless you override it. Only one strip runs at a time: starting BuildRail again leaves the running copy as it is. It draws with OpenGL on every system, and an idle strip draws nothing at all until something on it changes.
 
 Updating replaces the program file in place and starts the new copy, after giving back the screen edge and the one-strip lock. It is tested with fakes and against a local web server, but has not yet replaced a real installed copy on any system: that is step 10 of the checklist below.
@@ -180,7 +184,7 @@ Set `BUILDRAIL_CONFIG_DIR` to point the app at a scratch folder, so you can expe
 Releases are cut by a button, and the changelog decides the version.
 
 - **While working,** add a line under `## [Unreleased]` in `CHANGELOG.md` in the same pull request, written for the people using BuildRail. Anything **Added** or **Removed** makes the next release a minor one; changes and fixes make a patch.
-- **To release,** open Actions, pick **Release**, press **Run workflow** and leave the version blank. It checks CI passed, sets the version everywhere, tags, builds for Windows, macOS (Apple silicon and Intel) and Linux, and publishes once every download is attached. Tick **Rehearse** to see what it would do without doing it.
+- **To release,** open Actions, pick **Release**, press **Run workflow** and leave the version blank. It checks CI passed, sets the version everywhere, tags, builds for Windows, and publishes once every download is attached. For a major release, also tick **Also build macOS and Linux**: it then tests on macOS first and builds for macOS (Apple silicon and Intel) and Linux too. Tick **Rehearse** to see what it would do without doing it.
 - **To undo a bad release,** run **Roll back** with the last good version and a sentence on why.
 - **To try a pull request,** download the Windows test build from its checks.
 
