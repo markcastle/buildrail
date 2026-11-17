@@ -253,6 +253,7 @@ Most of these cost a failed or confusing release somewhere before they were unde
 | The Windows update file is not really gzip | Zip tools are not gzip | Git Bash's `gzip`, then `gzip -t` to prove it |
 | An action warns it runs on Node 20 | `upload-artifact@v5` still runs on Node 20 | `checkout@v7`, `upload-artifact@v7`, `download-artifact@v8`, all on Node 24 |
 | The install script cannot find the download | The file name carries a version that changes | Match by the end of the name, such as `-windows-x86_64.zip` |
+| A Mac refuses to run BuildRail after it updated itself | Apple silicon runs nothing unsigned, stripping can break the linker's signature, and an update never passes through the install script's `codesign` | The release build signs the macOS binary ad hoc and verifies it before packaging the download and the update file |
 | A broken or tampered download is installed | Nothing checked it | The install scripts check the SHA-256 against `SHA256SUMS.txt`; the app checks the signature |
 | Release notes are a wall of commit messages | They were generated from commits | The notes are the changelog section |
 | Nobody is sure what number to type | A rule that lives in someone's head | The changelog decides |

@@ -23,7 +23,7 @@ use egui_kittest::kittest::{NodeT, Queryable};
 use egui_kittest::Harness;
 use support::*;
 
-const CHIP: &str = "BuildRail 0.3.0 is available. Install now";
+const CHIP: &str = "BuildRail 0.3.0 is available. Open update options";
 const NOTES: &str = "https://github.com/markcastle/buildrail/releases/tag/v0.3.0";
 
 fn two_builds() -> Fixture {
@@ -68,7 +68,7 @@ fn settle(h: &mut Harness<'_, BuildRailUi>) {
 }
 
 #[test]
-fn the_chip_sits_before_the_wells_and_installs() {
+fn the_chip_sits_before_the_wells_and_opens_about_without_installing() {
     let f = two_builds();
     let mut h = offered(&f, [900.0, 200.0]);
     let order = labels_left_to_right(&h, Role::Button);
@@ -77,7 +77,32 @@ fn the_chip_sits_before_the_wells_and_installs() {
     assert_eq!(at("Add build") + 1, at("Settings"));
     assert!(at(CHIP) > order.iter().position(|l| l.starts_with("Site,")).unwrap());
 
+    // A click opens Settings on About; it never installs.
     h.get_by_label(CHIP).click();
+    settle(&mut h);
+    assert!(h.state().is_settings_open());
+    assert_eq!(h.state().settings().page, Page::About);
+    assert_eq!(f.world.updates.calls(), ["check"]);
+
+    // So does Enter on the focused chip.
+    h.state_mut().set_settings_open(false);
+    h.state_mut().settings_mut().page = Page::Builds;
+    h.get_by_label(CHIP).focus();
+    settle(&mut h);
+    h.key_press(egui::Key::Enter);
+    settle(&mut h);
+    assert!(h.state().is_settings_open());
+    assert_eq!(h.state().settings().page, Page::About);
+    assert_eq!(f.world.updates.calls(), ["check"]);
+}
+
+#[test]
+fn install_now_on_the_card_installs_and_restarts() {
+    let f = two_builds();
+    let mut h = offered(&f, [900.0, 200.0]);
+    h.get_by_label(CHIP).hover();
+    settle(&mut h);
+    h.get_by_label("Install now").click();
     step_until(&mut h, "restart", |_| {
         f.world.updates.calls().iter().any(|c| c == "restart")
     });

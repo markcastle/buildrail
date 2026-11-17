@@ -380,6 +380,18 @@ jobs:
           BUILDRAIL_UPDATE_PUBLIC_KEY: ${{ needs.prepare.outputs.public_key }}
         run: cargo build --release --locked -p buildrail-app --target "$TRIPLE"
 
+      # Apple silicon runs nothing without at least an ad-hoc signature.
+      # The linker signs the binary, but stripping can invalidate that, and
+      # a copy that replaced itself through the updater never passes
+      # through install.sh's own codesign step. So sign (ad hoc) and verify
+      # here, before the binary goes into the download and the update file.
+      - name: Sign the macOS binary (ad hoc)
+        if: runner.os == 'macOS'
+        run: |
+          binary="target/$TRIPLE/release/buildrail"
+          codesign --force --sign - "$binary"
+          codesign --verify --verbose "$binary"
+
       # Per platform: a download for people (a zip on Windows, a .tar.gz
       # elsewhere, with the README and changelog) and the update payload,
       # which is the bare executable gzipped. `gzip` is Git Bash's on Windows,

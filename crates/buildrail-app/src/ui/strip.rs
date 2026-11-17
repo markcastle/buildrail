@@ -16,7 +16,9 @@
 //!
 //! When a new BuildRail release is available (and updating automatically
 //! is off), one quiet accent "Update" chip sits before the wells.
-//! Activating it installs; hover or focus shows a small card with
+//! Activating it (click, Enter or Space) opens Settings on About, where
+//! Install now and What's new are; a stray click never installs. Hover or
+//! focus shows a small card with
 //! **Install now**, **What's new** (the release page) and **Not now**. It
 //! takes part in the overflow width computation like the wells, so it
 //! only pushes builds into the overflow when they would not fit beside
@@ -83,8 +85,11 @@ pub enum StripAction {
     Reconnect(buildrail_core::domain::WatchId),
     /// The user pressed on the caption of the floating window: move it.
     StartDrag,
-    /// Install the available update now.
+    /// Install the available update now (the card's Install now button).
     InstallUpdate,
+    /// Open Settings on About, where the update can be installed (the
+    /// chip itself).
+    OpenUpdates,
     /// Open the update's release page ("What's new").
     UpdateNotes(String),
     /// "Not now": hide the update offer until the next start.
@@ -337,8 +342,8 @@ impl StripView {
     }
 
     /// The "Update" chip: accent words on `accent-soft`, a pill like an
-    /// entry's. Returns what was asked for (the chip installs; the card
-    /// offers the rest).
+    /// entry's. Returns what was asked for: the chip opens Settings on
+    /// About; only the card's labelled Install now button installs.
     fn update_chip(
         &mut self,
         ui: &mut Ui,
@@ -350,8 +355,7 @@ impl StripView {
     ) -> Option<StripAction> {
         let response = ui.interact(rect, ui.scope_id().with("update-chip"), Sense::click());
         let name = chip.accessible_name();
-        let enabled = !chip.installing();
-        response.widget_info(|| WidgetInfo::labeled(Role::Button, enabled, &name));
+        response.widget_info(|| WidgetInfo::labeled(Role::Button, true, &name));
         let painter = ui.painter_at(strip);
         let pill = rect.shrink2(Vec2::new(0.0, PILL_INSET));
         let lit = response.hovered() || response.has_focus();
@@ -395,7 +399,7 @@ impl StripView {
         if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
             card.open = false;
         }
-        let mut action = (response.clicked() && enabled).then_some(StripAction::InstallUpdate);
+        let mut action = response.clicked().then_some(StripAction::OpenUpdates);
         if card.open {
             if let Some(chosen) = update_popup(ui.ctx(), chip, rect, tokens, card) {
                 action = Some(chosen);

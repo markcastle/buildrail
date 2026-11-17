@@ -26,7 +26,7 @@ You can also download a release from the [releases page](https://github.com/mark
 
 ### Staying up to date
 
-BuildRail looks for a new release about once an hour while it runs. When one is ready, a small **Update** mark appears at the right end of the strip. Hover over it for **Install now**, **What's new** (the release page) and **Not now**; nothing happens until you choose. Settings › About has **Check for updates** and an **Update automatically** switch, which is off unless you turn it on. With it on, a new release installs when none of your builds is running and Settings is closed, and BuildRail starts again by itself.
+BuildRail looks for a new release about once an hour while it runs. When one is ready, a small **Update** mark appears at the right end of the strip. Hover over it for **Install now**, **What's new** (the release page) and **Not now**. Clicking it, or pressing Enter on it, opens Settings › About, so a stray click never installs anything; nothing happens until you choose. Settings › About has **Check for updates** and an **Update automatically** switch, which is off unless you turn it on. With it on, a new release installs when none of your builds is running and Settings is closed, and BuildRail starts again by itself.
 
 Before installing, BuildRail checks that the download was signed by BuildRail's own release process and is the build for your system and that version. Anything else is refused and nothing changes. A copy you build yourself has no signing key in it, so it says "This build does not update itself" and never downloads anything.
 

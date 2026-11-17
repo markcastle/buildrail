@@ -184,12 +184,16 @@ impl UpdateChip {
         }
     }
 
-    /// What a screen reader says; activating the chip installs.
+    /// What a screen reader says; activating the chip opens Settings on
+    /// About, where the update is installed.
     pub fn accessible_name(&self) -> String {
         if self.0.installing {
-            format!("Installing BuildRail {}", self.0.version)
+            format!(
+                "Installing BuildRail {}. Open update options",
+                self.0.version
+            )
         } else {
-            format!("{} Install now", self.0.headline())
+            format!("{} Open update options", self.0.headline())
         }
     }
 
@@ -339,7 +343,7 @@ mod tests {
         assert_eq!(chip.label(), "Update");
         assert_eq!(
             chip.accessible_name(),
-            "BuildRail 0.3.0 is available. Install now"
+            "BuildRail 0.3.0 is available. Open update options"
         );
         assert_eq!(chip.headline(), "BuildRail 0.3.0 is available.");
         assert!(chip.notes_url().ends_with("/v0.3.0"));
@@ -349,7 +353,10 @@ mod tests {
         state.installing = true;
         let chip = state.chip(true).unwrap();
         assert_eq!(chip.label(), "Installing…");
-        assert_eq!(chip.accessible_name(), "Installing BuildRail 0.3.0");
+        assert_eq!(
+            chip.accessible_name(),
+            "Installing BuildRail 0.3.0. Open update options"
+        );
         state.installing = false;
         state.install_error = Some("Update not installed: no disk.".into());
         assert_eq!(

@@ -242,7 +242,7 @@ fn updates() {
             .with_pixels_per_point(PPP)
             .renderer(CpuRenderer::default())
             .build_ui_state(root_ui, app);
-        let chip = "BuildRail 0.3.0 is available. Install now";
+        let chip = "BuildRail 0.3.0 is available. Open update options";
         step_until(&mut h, "demo and chip", |h| {
             demo_loaded(h) && h.query_by_label(chip).is_some()
         });

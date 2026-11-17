@@ -775,7 +775,7 @@ mod updates {
         assert_eq!(line(&t), "BuildRail 0.3.0 is available.");
         assert_eq!(
             t.app.update_chip().unwrap().accessible_name(),
-            "BuildRail 0.3.0 is available. Install now"
+            "BuildRail 0.3.0 is available. Open update options"
         );
         // Not now: the chip goes for this version; About still says so.
         t.app.dismiss_update();

@@ -293,6 +293,10 @@ impl BuildRailUi {
                 }
                 StripAction::StartDrag => output.start_drag = true,
                 StripAction::InstallUpdate => self.controller.install_update(),
+                StripAction::OpenUpdates => {
+                    self.settings.page = super::settings::Page::About;
+                    self.settings_open = true;
+                }
                 StripAction::UpdateNotes(url) => {
                     self.last_error = self.controller.open_url(&url).err();
                 }
