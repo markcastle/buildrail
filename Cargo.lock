@@ -606,7 +606,7 @@ dependencies = [
 
 [[package]]
 name = "buildrail-app"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "buildrail-core",
@@ -628,7 +628,7 @@ dependencies = [
 
 [[package]]
 name = "buildrail-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -641,7 +641,7 @@ dependencies = [
 
 [[package]]
 name = "buildrail-platform"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "buildrail-core",
  "keyring",
@@ -657,7 +657,7 @@ dependencies = [
 
 [[package]]
 name = "buildrail-profile"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "buildrail-core",
  "chrono",
@@ -674,7 +674,7 @@ dependencies = [
 
 [[package]]
 name = "buildrail-providers"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "buildrail-core",
