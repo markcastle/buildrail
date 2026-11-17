@@ -3,9 +3,9 @@ name = "buildrail-platform"
 description = "BuildRail platform adapters: credential store, edge docking, fullscreen detection, URL opening, launch at login."
 version.workspace = true
 edition.workspace = true
-# keyring 4.x (the OS credential store adapter) requires Rust 1.88, and
-# `File::try_lock` (the single-instance lock file) Rust 1.89.
-rust-version = "1.89"
+# The workspace's 1.95 covers keyring 4.x (1.88) and `File::try_lock`
+# (the single-instance lock file, 1.89).
+rust-version.workspace = true
 license.workspace = true
 
 [dependencies]

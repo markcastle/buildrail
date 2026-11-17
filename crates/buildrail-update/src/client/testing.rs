@@ -9,6 +9,27 @@ use async_trait::async_trait;
 use crate::client::feed::{Feed, FetchError};
 use crate::client::install::{InstallError, Installer};
 use crate::client::restart::{RestartError, Restarter};
+use crate::client::updater::Update;
+use crate::manifest::TargetEntry;
+
+/// An [`Update`] to `version` whose release page is `notes_url`, for tests
+/// of code that only shows or passes updates on (the app's scripted update
+/// service). Its download entry is a placeholder: a real
+/// [`Updater`](crate::Updater) refuses to install it.
+pub fn update(version: semver::Version, notes_url: impl Into<String>) -> Update {
+    Update {
+        version,
+        notes_url: notes_url.into(),
+        target: "linux-x86_64",
+        entry: TargetEntry {
+            url: String::new(),
+            sha256: String::new(),
+            size: 0,
+            signature: String::new(),
+        },
+        key_id: String::new(),
+    }
+}
 
 /// A [`Feed`] serving fixed bytes. Unknown download URLs answer HTTP 404;
 /// downloads over `max_bytes` fail with [`FetchError::TooLarge`] like the
@@ -138,5 +159,25 @@ impl Restarter for RecordingRestarter {
     fn restart(&self) -> Result<(), RestartError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_test_update_is_never_installed_by_a_real_updater() {
+        let made = update(semver::Version::new(9, 0, 0), "https://example.com/notes");
+        assert_eq!(made.version.to_string(), "9.0.0");
+        assert_eq!(made.notes_url, "https://example.com/notes");
+        let updater = crate::Updater::new(
+            "0.1.0",
+            std::sync::Arc::new(StaticFeed::new("{}")),
+            std::sync::Arc::new(RecordingInstaller::new()),
+            std::sync::Arc::new(RecordingRestarter::new()),
+        )
+        .unwrap();
+        assert!(updater.install(&made).await.is_err());
     }
 }

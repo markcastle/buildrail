@@ -480,7 +480,9 @@ fn about_done_and_quit() {
     click(&mut h, "About");
     assert_eq!(h.state().settings().page, Page::About);
     assert!(h.query_by_label("MIT").is_some());
-    assert!(h.query_by_label(env!("CARGO_PKG_VERSION")).is_some());
+    assert!(h
+        .query_by_label(concat!("Version ", env!("CARGO_PKG_VERSION")))
+        .is_some());
     click(&mut h, "Connections");
     assert!(h.query_by_label_contains("No connections yet").is_some());
     h.state_mut().set_settings_open(true);
@@ -559,7 +561,9 @@ fn about_opens_the_log_folder() {
     let mut h = settings_only(&f);
     settle(&mut h);
     click(&mut h, "About");
-    assert!(h.query_by_label(env!("CARGO_PKG_VERSION")).is_some());
+    assert!(h
+        .query_by_label(concat!("Version ", env!("CARGO_PKG_VERSION")))
+        .is_some());
     // The folder does not exist yet: the error says so.
     click(&mut h, "Open log folder");
     wait_label(&mut h, "The log folder could not be opened");

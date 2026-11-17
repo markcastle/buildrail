@@ -26,7 +26,7 @@ Write what changed into `CHANGELOG.md` as the work lands. That one habit drives 
 5. It creates the GitHub release as a **draft** straight away, with the changelog section as its notes.
 6. Four runners build BuildRail for Windows, Apple silicon Macs, Intel Macs and Linux, each from the tag, and upload two files each to the draft.
 7. Once every build has succeeded, it signs the update files into `latest.json`, writes `SHA256SUMS.txt`, checks that everything is on the draft and matches, and **publishes** it. GitHub now calls it "latest".
-8. Running copies of BuildRail find `latest.json`, see a higher version, check its signature and update.
+8. Running copies of BuildRail find `latest.json` within the hour and see a higher version. They offer it on the strip and install it when the person says so (or by themselves at a quiet moment, for people who turned on Update automatically), checking its signature first.
 
 It takes about twenty minutes, nearly all of it building.
 

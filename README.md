@@ -6,6 +6,30 @@ BuildRail is a thin strip along the bottom of your screen that tells you, at a g
 
 It talks to GitHub and Cloudflare directly with a read-only token that you supply. There is no BuildRail account and no BuildRail server.
 
+## Installing
+
+Every release has BuildRail for Windows, for Macs with Apple silicon or Intel, and for 64-bit Linux. One line installs it for you alone, with no administrator prompt, checks the download against the release's checksums, and starts it. Run the same line again to update.
+
+Windows, in PowerShell:
+
+```powershell
+irm https://raw.githubusercontent.com/markcastle/buildrail/main/scripts/install.ps1 | iex
+```
+
+macOS and Linux:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/markcastle/buildrail/main/scripts/install.sh | sh
+```
+
+You can also download a release from the [releases page](https://github.com/markcastle/buildrail/releases) and run it from wherever you unpack it.
+
+### Staying up to date
+
+BuildRail looks for a new release about once an hour while it runs. When one is ready, a small **Update** mark appears at the right end of the strip. Hover over it for **Install now**, **What's new** (the release page) and **Not now**; nothing happens until you choose. Settings › About has **Check for updates** and an **Update automatically** switch, which is off unless you turn it on. With it on, a new release installs when none of your builds is running and Settings is closed, and BuildRail starts again by itself.
+
+Before installing, BuildRail checks that the download was signed by BuildRail's own release process and is the build for your system and that version. Anything else is refused and nothing changes. A copy you build yourself has no signing key in it, so it says "This build does not update itself" and never downloads anything.
+
 ## What the strip shows
 
 Each entry is the provider, your short label, a status icon and a status word.
@@ -74,7 +98,7 @@ account_id = "0123456789abcdef0123456789abcdef"
 worker = "marketing-site"
 ```
 
-Monitor, scale, theme, placement and start-at-login are kept in a separate per-device file and are never exported.
+Monitor, scale, theme, placement, animation, start-at-login and automatic updates are kept in a separate per-device file and are never exported.
 
 ## How it behaves on each system
 
@@ -85,13 +109,15 @@ Monitor, scale, theme, placement and start-at-login are kept in a separate per-d
 | Linux, Wayland | Compact movable window. A winit window cannot become a layer-shell surface yet. | Not run |
 | macOS | Compact movable window. macOS has no public way to reserve a screen edge. | Type-checked only. Never run. |
 
-The strip hides while a fullscreen app is on its monitor (Windows and X11), never takes keyboard focus on its own, and follows the system light or dark theme unless you override it.
+The strip hides while a fullscreen app is on its monitor (Windows and X11), never takes keyboard focus on its own, and follows the system light or dark theme unless you override it. Only one strip runs at a time: starting BuildRail again leaves the running copy as it is. It draws with OpenGL on every system, and an idle strip draws nothing at all until something on it changes.
+
+Updating replaces the program file in place and starts the new copy, after giving back the screen edge and the one-strip lock. It is tested with fakes and against a local web server, but has not yet replaced a real installed copy on any system: that is step 9 of the checklist below.
 
 > **Before you rely on it:** the real window has not been opened on any operating system yet. Everything above the window layer is tested, and the strip is rendered and checked headlessly, but the first job on each system is to run `--demo` and then the acceptance scenario below.
 
 ## Finding your way around the code
 
-The workspace is five crates. The rule is that knowledge flows one way: everything depends on `buildrail-core`, and `buildrail-core` depends on nothing else in the workspace.
+The app is five crates, plus three for updates and releases. The rule is that knowledge flows one way: everything depends on `buildrail-core`, and `buildrail-core` depends on nothing else in the workspace.
 
 | Crate | What lives there | Start reading at |
 |---|---|---|
@@ -100,6 +126,9 @@ The workspace is five crates. The rule is that knowledge flows one way: everythi
 | `buildrail-providers` | GitHub and Cloudflare adapters, and the lists the picker needs | `src/github/runs.rs`, `src/cloudflare/status.rs` |
 | `buildrail-platform` | Credential store, edge docking per OS, fullscreen detection, opening URLs, start at login | `src/dock/mod.rs` |
 | `buildrail-app` | The egui interface and the single place where real adapters are chosen | `src/compose.rs`, then `src/presentation/` |
+| `buildrail-update` | Self-update: the signed `latest.json` format, verification, and (feature `client`) checking, installing and restarting | `src/lib.rs` (the trust model in plain words) |
+| `buildrail-sign` | The release-time tool that signs update payloads and writes `latest.json` | `src/cli.rs` |
+| `xtask` | Release tooling: the changelog check, the next version, cutting a release | `src/release.rs` |
 
 A few things are worth knowing before you change anything.
 
@@ -120,7 +149,7 @@ The Cloudflare adapter was written from the API specification without access to 
 
 ## Building and testing
 
-You need Rust 1.95 or newer. No system packages are needed to build. On Linux the window needs `libxkbcommon-x11` at run time, and token storage needs a running Secret Service such as GNOME Keyring or KWallet.
+You need Rust 1.95 or newer. No system packages are needed to build. The window needs an OpenGL driver; on Linux it also needs `libxkbcommon-x11` at run time, and token storage needs a running Secret Service such as GNOME Keyring or KWallet.
 
 ```bash
 cargo test --workspace
@@ -157,18 +186,6 @@ Releases are cut by a button, and the changelog decides the version.
 
 Do not make tags or set the version by hand: a pushed tag builds nothing. Everything else, including the one-time update signing setup, is in [docs/releasing.md](docs/releasing.md).
 
-Install or update in one line. Windows, in PowerShell:
-
-```powershell
-irm https://raw.githubusercontent.com/markcastle/buildrail/main/scripts/install.ps1 | iex
-```
-
-macOS and Linux:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/markcastle/buildrail/main/scripts/install.sh | sh
-```
-
 ## Acceptance checklist for each operating system
 
 These are the checks that cannot be automated here and need a person at a real desktop.
@@ -181,12 +198,12 @@ These are the checks that cannot be automated here and need a person at a real d
 6. Disconnect the network and confirm the entries show their age and an offline note. Sleep and wake the machine and confirm they recover.
 7. Export the profile, import it on a second operating system, and confirm the same targets in the same order after you supply local tokens.
 8. Import a deliberately broken file and confirm your configuration is untouched.
+9. Install the previous release with the one-line installer, publish a new one, and confirm the Update mark appears within the hour (or at once with Check for updates), that Install now restarts into the new version with the strip docked where it was, and that a second start shows no leftover files beside the program.
 
 ## Not in this release
 
 - A hosted team service. Sharing a profile file covers teams whose members already have provider access.
 - Sign-in through the browser. Connecting is by pasted token; the code has a seam for a device flow.
 - Reserving a screen edge on Wayland and macOS.
-- A native file picker for import. You type or paste the path.
 - Operating-system code signing. Windows SmartScreen and macOS Gatekeeper warn the first time you run a copy you downloaded by hand; updates through the app are not affected.
 - A macOS app bundle. On macOS BuildRail is a single program, with no Dock or Launchpad icon.

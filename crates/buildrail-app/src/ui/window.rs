@@ -273,10 +273,10 @@ impl eframe::App for StripWindow {
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         tracing::info!("closing");
-        self.ui.controller().shutdown();
-        // Gives the screen edge back (and anything else held) before the
+        // Stops refreshing, writes the snapshot cache one last time and
+        // gives the screen edge back (and anything else held) before the
         // window is destroyed.
-        self.ui.controller().lifecycle().release_all();
+        self.ui.controller().close();
         self.shell = None;
     }
 }

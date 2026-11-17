@@ -5,6 +5,7 @@ members = ["crates/*"]
 [workspace.package]
 version = "0.2.0"
 edition = "2021"
+# One minimum for every crate; CI's "Minimum supported Rust" job checks it.
 rust-version = "1.95"
 license = "MIT"
 

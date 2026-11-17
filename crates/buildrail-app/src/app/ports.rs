@@ -104,4 +104,6 @@ pub struct Services {
     pub folders: Arc<dyn FolderOpener>,
     /// Where log files are written, when they are.
     pub logs_dir: Option<PathBuf>,
+    /// Checks for, installs and starts new releases.
+    pub updates: Arc<dyn super::updates::UpdateService>,
 }

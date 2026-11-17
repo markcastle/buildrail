@@ -3,8 +3,8 @@ name = "buildrail-app"
 description = "BuildRail desktop app: the 24 px build-status strip, its settings window and the composition root."
 version.workspace = true
 edition.workspace = true
-# eframe/egui 0.37 require Rust 1.95, above the workspace's 1.88.
-rust-version = "1.95"
+# The workspace's 1.95 is what eframe/egui 0.37 require.
+rust-version.workspace = true
 license.workspace = true
 
 [[bin]]
@@ -16,6 +16,10 @@ buildrail-core.workspace = true
 buildrail-platform.workspace = true
 buildrail-profile.workspace = true
 buildrail-providers.workspace = true
+# The self-updater: feed, verification, install and restart. `client`
+# brings in the HTTP feed and installer; the release build embeds the
+# public key from BUILDRAIL_UPDATE_PUBLIC_KEY (see the crate's build.rs).
+buildrail-update = { workspace = true, features = ["client"] }
 async-trait.workspace = true
 chrono.workspace = true
 thiserror.workspace = true

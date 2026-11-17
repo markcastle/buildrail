@@ -168,6 +168,12 @@ fn settings_pages() {
             (Page::About, "about"),
         ] {
             h.state_mut().settings_mut().page = page;
+            if page == Page::About {
+                h.state().controller().check_for_updates();
+                step_until(&mut h, "answer", |h| {
+                    h.query_by_label("Up to date.").is_some()
+                });
+            }
             shoot(&mut h, &format!("settings-{file}-{name}.png"));
         }
     }
@@ -212,5 +218,86 @@ fn wizard_steps() {
             h.query_by_label("Use this build").is_some()
         });
         shoot(&mut h, &format!("wizard-preview-{name}.png"));
+    }
+}
+
+/// The strip offering 0.3.0, its card on its own, and About in its
+/// update states.
+#[test]
+#[ignore = "renders screenshots; run with --ignored"]
+fn updates() {
+    use buildrail_app::fakes::ScriptedUpdateService;
+    use buildrail_app::ui::strip::update_card;
+
+    for (theme, name) in THEMES {
+        // The strip with the Update chip at rest (its card is shot below).
+        let f = Fixture::new();
+        f.world
+            .updates
+            .answer(ScriptedUpdateService::available("0.3.0"));
+        let app = with_system_font(demo_ui(&f, theme));
+        app.controller().check_for_updates();
+        let mut h = Harness::builder()
+            .with_size([1280.0, 24.0])
+            .with_pixels_per_point(PPP)
+            .renderer(CpuRenderer::default())
+            .build_ui_state(root_ui, app);
+        let chip = "BuildRail 0.3.0 is available. Install now";
+        step_until(&mut h, "demo and chip", |h| {
+            demo_loaded(h) && h.query_by_label(chip).is_some()
+        });
+        shoot(&mut h, &format!("strip-update-{name}.png"));
+
+        // Its card, on its own.
+        let offer = h.state().controller().update_chip().unwrap();
+        let tokens = Tokens::for_theme(theme, None);
+        let mut card = Harness::builder()
+            .with_size([320.0, 110.0])
+            .with_pixels_per_point(PPP)
+            .renderer(CpuRenderer::default())
+            .build_ui_state(
+                move |ui, installed: &mut bool| {
+                    if !*installed {
+                        *installed = true;
+                        fonts::install(ui.ctx(), &SystemFontSource, &Platform::Linux);
+                        style::install(ui.ctx(), &tokens);
+                    }
+                    let full = ui.ctx().content_rect();
+                    ui.painter().rect_filled(full, 0.0, tokens.bg);
+                    let mut child = ui.new_child(egui::UiBuilder::new().max_rect(full));
+                    update_card(&mut child, &offer, &tokens);
+                },
+                false,
+            );
+        for _ in 0..4 {
+            card.step();
+        }
+        save_png(
+            &card.render().unwrap(),
+            &screenshot_path(&format!("strip-update-card-{name}.png")),
+        );
+
+        // About: an update available, then a build that does not update
+        // itself.
+        let f = Fixture::new();
+        f.world
+            .updates
+            .answer(ScriptedUpdateService::available("0.3.0"));
+        let mut app = with_system_font(demo_ui(&f, theme));
+        app.settings_mut().page = Page::About;
+        app.controller().check_for_updates();
+        let mut h = settings_harness(app, 640.0);
+        step_until(&mut h, "offer", |h| {
+            h.query_by_label("Install now").is_some()
+        });
+        shoot(&mut h, &format!("settings-about-update-{name}.png"));
+        f.world
+            .updates
+            .answer(buildrail_update::UpdateStatus::NotConfigured);
+        h.state().controller().check_for_updates();
+        step_until(&mut h, "not configured", |h| {
+            h.query_by_label("Open releases page").is_some()
+        });
+        shoot(&mut h, &format!("settings-about-not-configured-{name}.png"));
     }
 }

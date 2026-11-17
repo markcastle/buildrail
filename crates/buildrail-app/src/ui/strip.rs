@@ -14,6 +14,14 @@
 //! is keyboard focusable (Tab, Shift+Tab, arrow keys), activates on
 //! Enter/Space or click, and carries an AccessKit name.
 //!
+//! When a new BuildRail release is available (and updating automatically
+//! is off), one quiet accent "Update" chip sits before the wells.
+//! Activating it installs; hover or focus shows a small card with
+//! **Install now**, **What's new** (the release page) and **Not now**. It
+//! takes part in the overflow width computation like the wells, so it
+//! only pushes builds into the overflow when they would not fit beside
+//! it.
+//!
 //! Hover or keyboard focus reveals an entry's details. The strip window is
 //! only 24 px tall, so details (and the overflow list) open in their own
 //! small, non-activating viewport above the strip; in single-window test
@@ -32,8 +40,8 @@ use eframe::egui::{
 
 use super::glyphs::{paint_gear, paint_icon, paint_plus, paint_provider_mark};
 use super::theme::{radius, type_style, Tokens, TypeStyle};
-use super::widgets::{self, icon_button_at};
-use crate::presentation::{fit, provider_mark, OverflowGroup, StripEntry, StripModel};
+use super::widgets::{self, button, icon_button_at, ButtonKind};
+use crate::presentation::{fit, provider_mark, OverflowGroup, StripEntry, StripModel, UpdateChip};
 
 /// Height of the strip in logical pixels (points).
 pub const STRIP_HEIGHT: f32 = 24.0;
@@ -75,12 +83,30 @@ pub enum StripAction {
     Reconnect(buildrail_core::domain::WatchId),
     /// The user pressed on the caption of the floating window: move it.
     StartDrag,
+    /// Install the available update now.
+    InstallUpdate,
+    /// Open the update's release page ("What's new").
+    UpdateNotes(String),
+    /// "Not now": hide the update offer until the next start.
+    DismissUpdate,
 }
 
 /// Per-strip UI state that survives frames.
 #[derive(Debug, Default)]
 pub struct StripView {
     overflow_open: bool,
+    update: Option<UpdateChip>,
+    update_card: UpdateCardState,
+}
+
+/// Whether the update card is open and why.
+#[derive(Debug, Default, Clone, Copy)]
+struct UpdateCardState {
+    open: bool,
+    /// Opened by keyboard focus (closes when focus moves on).
+    by_focus: bool,
+    /// The pointer was over the card last frame (closes when it leaves).
+    had_pointer: bool,
 }
 
 struct Measured {
@@ -113,6 +139,19 @@ impl StripView {
     /// `true` while the overflow list is open.
     pub fn is_overflow_open(&self) -> bool {
         self.overflow_open
+    }
+
+    /// Sets the update offer to show (`None`: no chip).
+    pub fn set_update(&mut self, chip: Option<UpdateChip>) {
+        if chip.is_none() {
+            self.update_card = UpdateCardState::default();
+        }
+        self.update = chip;
+    }
+
+    /// `true` while the update card is open.
+    pub fn is_update_card_open(&self) -> bool {
+        self.update_card.open
     }
 
     /// Draws the strip in the top `STRIP_HEIGHT` points of `ui` and returns
@@ -175,7 +214,7 @@ impl StripView {
         let well =
             |right: f32| Rect::from_center_size(pos2(right - WELL / 2.0, y), Vec2::splat(WELL));
         let settings_rect = well(strip.max.x - PILL_INSET);
-        let right_edge = if model.is_empty() {
+        let mut right_edge = if model.is_empty() {
             settings_rect.min.x
         } else {
             let add_rect = well(settings_rect.min.x - WELL_GAP);
@@ -202,6 +241,25 @@ impl StripView {
         );
         if response.clicked() {
             actions.push(StripAction::OpenSettings);
+        }
+
+        // The update offer, before the wells; the builds fit beside it.
+        if let Some(chip) = self.update.clone() {
+            let label = galley(
+                ui,
+                type_style::STRIP_LABEL,
+                chip.label(),
+                tokens.accent_ink(),
+            );
+            let width = (PAD + label.size().x + PAD).ceil();
+            let rect = Rect::from_min_size(
+                pos2(right_edge - WELL_GAP - width, strip.min.y),
+                Vec2::new(width, STRIP_HEIGHT),
+            );
+            if let Some(action) = self.update_chip(ui, rect, strip, &chip, label, tokens) {
+                actions.push(action);
+            }
+            right_edge = rect.min.x;
         }
 
         let left = caption_rect.max.x + 4.0;
@@ -276,6 +334,79 @@ impl StripView {
             self.overflow_open = false;
         }
         actions
+    }
+
+    /// The "Update" chip: accent words on `accent-soft`, a pill like an
+    /// entry's. Returns what was asked for (the chip installs; the card
+    /// offers the rest).
+    fn update_chip(
+        &mut self,
+        ui: &mut Ui,
+        rect: Rect,
+        strip: Rect,
+        chip: &UpdateChip,
+        label: Arc<Galley>,
+        tokens: &Tokens,
+    ) -> Option<StripAction> {
+        let response = ui.interact(rect, ui.scope_id().with("update-chip"), Sense::click());
+        let name = chip.accessible_name();
+        let enabled = !chip.installing();
+        response.widget_info(|| WidgetInfo::labeled(Role::Button, enabled, &name));
+        let painter = ui.painter_at(strip);
+        let pill = rect.shrink2(Vec2::new(0.0, PILL_INSET));
+        let lit = response.hovered() || response.has_focus();
+        let fill = if lit {
+            tokens.accent_soft_hover()
+        } else {
+            tokens.accent_soft
+        };
+        painter.rect_filled(pill, CornerRadius::same(radius::R6), fill);
+        if response.has_focus() {
+            painter.rect_stroke(
+                pill,
+                CornerRadius::same(radius::R6),
+                Stroke::new(2.0, tokens.accent),
+                StrokeKind::Inside,
+            );
+        }
+        let y = rect.center().y;
+        painter.galley(
+            pos2(rect.min.x + PAD, y - label.size().y / 2.0),
+            label,
+            tokens.accent_ink(),
+        );
+
+        // The card opens on hover or focus and stays while the pointer
+        // moves into it; it closes when the pointer goes elsewhere on the
+        // strip or leaves the card, when focus moves on, or on Escape.
+        let card = &mut self.update_card;
+        let pointer_on_strip = ui
+            .ctx()
+            .pointer_hover_pos()
+            .is_some_and(|p| strip.contains(p));
+        if lit {
+            if !card.open {
+                card.by_focus = response.has_focus() && !response.hovered();
+            }
+            card.open = true;
+        } else if pointer_on_strip || (card.by_focus && !card.had_pointer) {
+            card.open = false;
+        }
+        if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+            card.open = false;
+        }
+        let mut action = (response.clicked() && enabled).then_some(StripAction::InstallUpdate);
+        if card.open {
+            if let Some(chosen) = update_popup(ui.ctx(), chip, rect, tokens, card) {
+                action = Some(chosen);
+            }
+        } else {
+            card.had_pointer = false;
+        }
+        if action.is_some() {
+            self.update_card = UpdateCardState::default();
+        }
+        action
     }
 
     fn empty_state(
@@ -615,6 +746,117 @@ fn details(ctx: &egui::Context, entry: &StripEntry, anchor: Rect, tokens: &Token
         builder,
         |ui, _| detail_card(ui, entry, &tokens),
     );
+}
+
+/// The content of the update card: the one line, the last install error
+/// if there is one, and Install now / What's new / Not now. Returns the
+/// button pressed.
+pub fn update_card(ui: &mut Ui, chip: &UpdateChip, tokens: &Tokens) -> Option<StripAction> {
+    let mut action = None;
+    card_frame(tokens).show(ui, |ui| {
+        ui.set_width(CARD_WIDTH - 2.0 * CARD_PAD.x);
+        ui.spacing_mut().item_spacing = Vec2::new(GAP, 3.0);
+        add_text(ui, type_style::LABEL, &chip.headline(), tokens.text);
+        if let Some(error) = chip.error() {
+            add_text(ui, type_style::HELP, error, tokens.error_text());
+        }
+        ui.add_space(UPDATE_CARD_GAP);
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing = Vec2::new(4.0, 0.0);
+            let installing = chip.installing();
+            let install = if installing {
+                "Installing…"
+            } else {
+                "Install now"
+            };
+            if button(ui, tokens, ButtonKind::Primary, install, !installing, true).clicked() {
+                action = Some(StripAction::InstallUpdate);
+            }
+            if button(ui, tokens, ButtonKind::Quiet, "What's new", true, true).clicked() {
+                action = Some(StripAction::UpdateNotes(chip.notes_url().to_owned()));
+            }
+            if button(ui, tokens, ButtonKind::Quiet, "Not now", !installing, true).clicked() {
+                action = Some(StripAction::DismissUpdate);
+            }
+        });
+    });
+    action
+}
+
+/// Space between the update card's words and its buttons.
+const UPDATE_CARD_GAP: f32 = 8.0;
+
+/// The update card's popup size, measured from the same text.
+fn update_card_size(ctx: &egui::Context, chip: &UpdateChip) -> Vec2 {
+    let width = CARD_WIDTH - 2.0 * CARD_PAD.x;
+    let height_of = |style: TypeStyle, text: &str| {
+        ctx.fonts_mut(|f| f.layout_job(style.wrapped(text, egui::Color32::PLACEHOLDER, width)))
+            .size()
+            .y
+    };
+    let mut height = 2.0 * CARD_PAD.y + height_of(type_style::LABEL, &chip.headline());
+    if let Some(error) = chip.error() {
+        height += 3.0 + height_of(type_style::HELP, error);
+    }
+    // Compact buttons: 5 px above and below the label.
+    height += 3.0 + UPDATE_CARD_GAP + height_of(type_style::BUTTON, "Install now") + 10.0;
+    Vec2::new(CARD_WIDTH, height.ceil() + 2.0) + Vec2::splat(2.0 * CARD_MARGIN)
+}
+
+/// Shows the update card above the chip (or under the strip in a test
+/// harness) and keeps `card` up to date with the pointer.
+fn update_popup(
+    ctx: &egui::Context,
+    chip: &UpdateChip,
+    anchor: Rect,
+    tokens: &Tokens,
+    card: &mut UpdateCardState,
+) -> Option<StripAction> {
+    fn track(over: bool, escape: bool, card: &mut UpdateCardState) {
+        if (card.had_pointer && !over) || escape {
+            card.open = false;
+        }
+        card.had_pointer = over;
+    }
+    let mut action = None;
+    if ctx.embed_viewports() {
+        let at = pos2(
+            (anchor.max.x + CARD_MARGIN - CARD_WIDTH - 2.0 * CARD_MARGIN).max(0.0),
+            STRIP_HEIGHT,
+        );
+        let shown = egui::Area::new(egui::Id::unique("buildrail-update-card"))
+            .fixed_pos(at)
+            .constrain(false)
+            .order(egui::Order::Foreground)
+            .show(ctx, |ui| update_card(ui, chip, tokens));
+        action = shown.inner;
+        let over = ctx
+            .pointer_hover_pos()
+            .is_some_and(|p| shown.response.rect.contains(p));
+        track(over, false, card);
+        return action;
+    }
+    let size = update_card_size(ctx, chip);
+    // Right-aligned with the chip: it sits at the strip's right end.
+    let aligned = Rect::from_min_size(pos2(anchor.max.x - CARD_WIDTH, anchor.min.y), anchor.size());
+    let position = popup_position(ctx, aligned, size);
+    let builder = popup_builder("BuildRail update", position, size);
+    let tokens = *tokens;
+    ctx.show_viewport_immediate(
+        ViewportId::from_hash_of("buildrail-update-card"),
+        builder,
+        |ui, _| {
+            let (over, escape) = ui.input(|i| {
+                (
+                    i.pointer.hover_pos().is_some(),
+                    i.key_pressed(egui::Key::Escape) || i.viewport().close_requested(),
+                )
+            });
+            track(over, escape, card);
+            action = update_card(ui, chip, &tokens);
+        },
+    );
+    action
 }
 
 /// One hidden build in the overflow card; returns its response.

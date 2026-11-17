@@ -45,6 +45,10 @@ pub struct DevicePrefs {
     /// on the strip moves unless asked.
     #[serde(skip_serializing_if = "is_false")]
     pub animation: bool,
+    /// Install new BuildRail releases without asking, at a quiet moment.
+    /// Off by default: the strip offers the update and waits.
+    #[serde(skip_serializing_if = "is_false")]
+    pub update_automatically: bool,
     /// Local provider connections by alias. Secrets are *not* here: they
     /// live in the OS credential store under the same alias.
     pub connections: BTreeMap<ConnectionAlias, LocalConnection>,
@@ -59,6 +63,7 @@ impl Default for DevicePrefs {
             monitor: None,
             placement: Placement::DockedBottom,
             animation: false,
+            update_automatically: false,
             connections: BTreeMap::new(),
         }
     }
@@ -241,6 +246,7 @@ mod tests {
                 position: Some(Position { x: -1200, y: 40 }),
             },
             animation: true,
+            update_automatically: true,
             connections: BTreeMap::new(),
         };
         prefs.connections.insert(
@@ -305,6 +311,16 @@ ignored = true
             DevicePrefs::decode("version = 1\nanimation = true\n")
                 .unwrap()
                 .animation
+        );
+        assert!(!prefs.update_automatically, "absent means off");
+        assert!(!DevicePrefs::default()
+            .encode()
+            .unwrap()
+            .contains("update_automatically"));
+        assert!(
+            DevicePrefs::decode("version = 1\nupdate_automatically = true\n")
+                .unwrap()
+                .update_automatically
         );
         assert_eq!(
             prefs.placement,

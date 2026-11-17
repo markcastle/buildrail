@@ -24,13 +24,22 @@
 //! ([`snapshots_differ_visibly`]); a refresh that merely confirms
 //! unchanged data asks for nothing.
 //!
+//! # Updates
+//!
+//! The controller starts the background update check loop
+//! ([`run_update_loop`](super::updates::run_update_loop)) and owns the one
+//! install flow used by the strip's chip, Settings and automatic updates
+//! ([`AppController::install_update`], finished by
+//! [`AppController::poll_update`] on the UI thread). See `update_flow.rs`.
+//!
 //! # Restarting
 //!
 //! [`AppController::prepare_for_restart`] gets the process ready to be
 //! replaced (a self-update): it stops the refresh engine, writes the
 //! preferences and the snapshot cache, and releases everything registered
 //! with the [`Lifecycle`] (the docked screen edge, the single-instance
-//! lock).
+//! lock). [`AppController::close`] does the same on a normal exit, minus
+//! the preferences (they are saved as they change).
 //!
 //! # Consistency
 //!
@@ -57,6 +66,7 @@ use tokio::runtime::Handle;
 
 use super::lifecycle::Lifecycle;
 use super::ports::Services;
+use super::updates::{run_update_loop, SharedUpdates};
 use crate::presentation::{snapshots_differ_visibly, StripModel};
 use crate::settings::{
     watches_using, CatalogItems, CatalogQuery, Command, ConnectError, ConnectRequest, Event,
@@ -137,6 +147,7 @@ pub struct AppController {
     repaint: Repainter,
     cache: Arc<dyn SnapshotCache>,
     lifecycle: Lifecycle,
+    updates: SharedUpdates,
 }
 
 impl AppController {
@@ -191,6 +202,14 @@ impl AppController {
             }
         });
 
+        let updates = SharedUpdates::default();
+        let on_update = repaint.clone();
+        runtime.spawn(run_update_loop(
+            services.updates.clone(),
+            updates.clone(),
+            move || on_update.request(),
+        ));
+
         let (jobs_tx, jobs_rx) = mpsc::channel();
         let controller = Self {
             services,
@@ -207,6 +226,7 @@ impl AppController {
             repaint,
             cache,
             lifecycle: Lifecycle::new(),
+            updates,
         };
         controller.push_watches();
         controller
@@ -295,6 +315,16 @@ impl AppController {
     /// Stops the refresh engine.
     pub fn shutdown(&self) {
         self.refresh.shutdown();
+    }
+
+    /// The way out on a normal exit (Quit, closing the window): stops the
+    /// refresh engine, writes the snapshot cache one last time (the engine
+    /// writes timestamp-only changes only every few minutes) and releases
+    /// everything in the [`Lifecycle`]. Safe to call more than once.
+    pub fn close(&self) {
+        self.refresh.shutdown();
+        self.cache.save(&self.refresh.snapshots());
+        self.lifecycle.release_all();
     }
 
     /// Gets ready for this process to be replaced by a new one (the
@@ -780,6 +810,8 @@ async fn verify(
         }
     }
 }
+
+mod update_flow;
 
 #[cfg(test)]
 mod tests;

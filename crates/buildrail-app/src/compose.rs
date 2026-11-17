@@ -7,6 +7,12 @@
 //! small tokio runtime and hands everything to eframe (OpenGL through
 //! glow). Nothing else in the crate names a concrete adapter type.
 //!
+//! Updates: [`run`] first removes what an earlier self-update left beside
+//! the executable ([`cleanup_after_update`]); the production ports carry
+//! the real [`Updater`] (GitHub release feed, verified with the key baked
+//! in at build time), `--demo` a fake that reports the build does not
+//! update itself, so the demo never touches the network.
+//!
 //! Everything the app holds (the screen edge, the single-instance lock) is
 //! registered with the controller's [`Lifecycle`] and given back on every
 //! way out: Quit and closing the window (`on_exit`), Ctrl+C and SIGTERM
@@ -39,15 +45,19 @@ use buildrail_platform::single_instance::{
 use buildrail_platform::url_opener::SystemUrlOpener;
 use buildrail_profile::{AppPaths, DevicePrefs};
 use buildrail_providers::{default_http_client, ProviderSet};
+use buildrail_update::{cleanup_after_update, Updater};
 use eframe::egui;
 use raw_window_handle::RawWindowHandle;
 use thiserror::Error;
 use tokio::runtime::Handle;
 
-use crate::app::{AppController, Catalogs, InstanceLock, Lifecycle, ReleaseOnDrop, Services};
+use crate::app::{
+    AppController, Catalogs, InstanceLock, Lifecycle, NoUpdates, ReleaseOnDrop, Services,
+    UpdateService,
+};
 use crate::demo::{demo_connections, demo_profile, DemoRunSource, LoggingUrlOpener};
 use crate::dialogs::RfdFileDialog;
-use crate::fakes::FakeCatalog;
+use crate::fakes::{FakeCatalog, ScriptedUpdateService};
 use crate::shell::DockController;
 use crate::ui::window::{strip_viewport, ShellFactory, StripWindow};
 use crate::ui::{BuildRailUi, FrameCounter};
@@ -194,7 +204,7 @@ pub fn app_paths(dir: Option<OsString>) -> Result<AppPaths, buildrail_profile::N
 }
 
 /// The default log filter: `info` for BuildRail crates, `warn` otherwise.
-pub const DEFAULT_LOG_FILTER: &str = "warn,buildrail_app=info,buildrail_core=info,buildrail_providers=info,buildrail_platform=info,buildrail_profile=info";
+pub const DEFAULT_LOG_FILTER: &str = "warn,buildrail_app=info,buildrail_core=info,buildrail_providers=info,buildrail_platform=info,buildrail_profile=info,buildrail_update=info";
 
 /// Starts logging to the terminal and, when `logs_dir` is given, to a
 /// daily log file there (`buildrail.YYYY-MM-DD.log`, at most
@@ -298,10 +308,45 @@ async fn ctrl_c() {
     }
 }
 
+/// The running version.
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// Removes what an earlier self-update left beside the executable (the
+/// moved-aside old copy on Windows, a half-written file after a crash)
+/// and logs what happened. Call early, once.
+pub fn clean_up_after_update() {
+    match cleanup_after_update() {
+        Ok(true) => tracing::info!("removed the files a previous update left behind"),
+        Ok(false) => tracing::debug!("nothing left behind by an update"),
+        Err(error) => {
+            tracing::warn!(%error, "could not remove the files a previous update left behind")
+        }
+    }
+}
+
+/// The real update service, or one that never updates when the updater
+/// could not be set up (logged).
+pub fn production_updates(
+    updater: Result<Updater, buildrail_update::SetupError>,
+) -> Arc<dyn UpdateService> {
+    match updater {
+        Ok(updater) => Arc::new(updater),
+        Err(error) => {
+            tracing::warn!(%error, "self-update is unavailable");
+            Arc::new(NoUpdates::new(
+                buildrail_update::Version::parse(VERSION)
+                    .unwrap_or_else(|_| buildrail_update::Version::new(0, 0, 0)),
+            ))
+        }
+    }
+}
+
 /// The production ports. Dialog work runs on `runtime`.
 pub fn production_services(paths: &AppPaths, runtime: &Handle) -> Result<Services, StartError> {
     let clock: Arc<dyn Clock> = Arc::new(SystemClock);
     let client = default_http_client().map_err(|e| StartError::Init(e.to_string()))?;
+    // One HTTP client (and connection pool) for providers and updates.
+    let updates = production_updates(Updater::for_this_app(client.clone(), VERSION));
     let providers = ProviderSet::new(client, clock.clone());
     let autostart: Option<Arc<dyn Autostart>> = LaunchCommand::current()
         .and_then(platform_autostart)
@@ -323,6 +368,7 @@ pub fn production_services(paths: &AppPaths, runtime: &Handle) -> Result<Service
         dialogs: Arc::new(RfdFileDialog::new(runtime.clone())),
         folders: Arc::new(SystemFolderOpener),
         logs_dir: Some(paths.logs_dir().to_owned()),
+        updates,
     })
 }
 
@@ -382,6 +428,8 @@ pub fn demo_services(paths: &AppPaths, runtime: &Handle) -> Result<Services, Sta
         dialogs: Arc::new(RfdFileDialog::new(runtime.clone())),
         folders: Arc::new(SystemFolderOpener),
         logs_dir: Some(paths.logs_dir().to_owned()),
+        // The demo never touches the network: it does not update itself.
+        updates: Arc::new(ScriptedUpdateService::not_configured(VERSION)),
     })
 }
 
@@ -475,6 +523,7 @@ pub fn run(options: &Options) -> Result<(), StartError> {
     };
     init_logging(Some(paths.logs_dir()));
     log_panics();
+    clean_up_after_update();
 
     let override_path = override_dir.as_deref().map(Path::new);
     let name = instance_name(options.demo, override_path);
@@ -486,7 +535,7 @@ pub fn run(options: &Options) -> Result<(), StartError> {
 
     let runtime = runtime()?;
     tracing::info!(
-        version = env!("CARGO_PKG_VERSION"),
+        version = VERSION,
         profile = %paths.profile_file().display(),
         demo = options.demo,
         "starting BuildRail"

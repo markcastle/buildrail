@@ -619,6 +619,7 @@ dependencies = [
  "buildrail-platform",
  "buildrail-profile",
  "buildrail-providers",
+ "buildrail-update",
  "chrono",
  "eframe",
  "egui_kittest",

@@ -50,7 +50,8 @@ pub struct FrameOutput {
     pub start_drag: bool,
     /// Placement, monitor or scale preferences changed.
     pub placement_changed: bool,
-    /// The user chose Quit BuildRail.
+    /// The user chose Quit BuildRail, or an installed update is
+    /// restarting the app: close the window.
     pub quit: bool,
 }
 
@@ -135,6 +136,11 @@ impl BuildRailUi {
     /// The system font family in use, once installed (`None` = egui's own).
     pub fn font_family(&self) -> Option<&'static str> {
         self.font_family
+    }
+
+    /// The strip widget's state (which popups are open).
+    pub fn strip_view(&self) -> &StripView {
+        &self.strip
     }
 
     /// The controller.
@@ -253,6 +259,11 @@ impl BuildRailUi {
         self.frames.record();
         let mut output = FrameOutput::default();
         let tokens = self.begin_frame(&ctx);
+        // An installed update restarts the app: close cleanly.
+        output.quit = self.controller.poll_update();
+        self.controller
+            .maybe_install_automatically(self.settings_open);
+        self.strip.set_update(self.controller.update_chip());
 
         let now = self.controller.now();
         let model = self.controller.strip();
@@ -281,6 +292,11 @@ impl BuildRailUi {
                     self.settings_open = true;
                 }
                 StripAction::StartDrag => output.start_drag = true,
+                StripAction::InstallUpdate => self.controller.install_update(),
+                StripAction::UpdateNotes(url) => {
+                    self.last_error = self.controller.open_url(&url).err();
+                }
+                StripAction::DismissUpdate => self.controller.dismiss_update(),
             }
         }
 
@@ -310,7 +326,7 @@ impl BuildRailUi {
                 },
             );
             output.placement_changed = outcome.placement_changed;
-            output.quit = outcome.quit;
+            output.quit |= outcome.quit;
             if close || outcome.close {
                 self.settings_open = false;
             }
@@ -323,6 +339,7 @@ impl BuildRailUi {
     pub fn settings_ui(&mut self, ui: &mut Ui) -> FrameOutput {
         let ctx = ui.ctx().clone();
         let tokens = self.begin_frame(&ctx);
+        let restarting = self.controller.poll_update();
         let outcome = self
             .settings
             .ui(ui, &mut self.controller, &self.device, &tokens);
@@ -332,7 +349,7 @@ impl BuildRailUi {
         FrameOutput {
             start_drag: false,
             placement_changed: outcome.placement_changed,
-            quit: outcome.quit,
+            quit: outcome.quit || restarting,
         }
     }
 }

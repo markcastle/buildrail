@@ -92,8 +92,10 @@ jobs:
             exit 1
           fi
           # A tree from before self-update would strand everyone who takes
-          # the roll-forward: it could never update again.
-          if ! git cat-file -e "v$TO:crates/buildrail-update/Cargo.toml" 2>/dev/null; then
+          # the roll-forward: it could never update again. The app updates
+          # itself when it depends on buildrail-update (the crate alone, as
+          # on the branch that introduced it, is not enough).
+          if ! git show "v$TO:crates/buildrail-app/Cargo.toml" 2>/dev/null | grep -q '^buildrail-update'; then
             echo "::error::v$TO is from before BuildRail could update itself. Rolling back to it would leave every copy that takes it unable to update again. Pick a later version, or fix forward."
             exit 1
           fi

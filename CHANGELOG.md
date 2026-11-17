@@ -8,18 +8,29 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ### Added
 
-- **BuildRail updates itself.** It checks for a newer release while it runs, makes sure the download really came from BuildRail's own release process, and replaces itself with it. Nothing to download by hand, and a tampered or mislabelled download is refused rather than installed.
+- **BuildRail can update itself, and asks first.** While it runs it looks for a new release. When one is ready, a small Update mark appears at the right end of the strip: install it there and then, see what's new, or say not now. It never interrupts you, and nothing changes unless you choose. Every download is checked to have come from BuildRail's own release process; a tampered or mislabelled one is refused and nothing is installed.
+- **Check for updates and Update automatically, in Settings › About.** Checking answers in one line. Update automatically is off unless you turn it on; then a new release installs at a quiet moment, when none of your builds is running and Settings is closed, and BuildRail starts again on its own.
 - **Install or update in one line.** Paste one command into PowerShell on Windows, or a terminal on macOS and Linux, and BuildRail is installed for you alone, with no administrator prompt, and started. Run the same line again to update. It checks the download against the release's published checksums before using it.
 - **Downloads for macOS and Linux.** Each release now has BuildRail for Windows, for Macs with Apple silicon and with Intel, and for 64-bit Linux.
+- **An Animation switch in Settings › Strip,** for a building mark that turns while a build runs.
+- **A log of what BuildRail did recently,** kept for a few days and never holding a token. Settings › About › Open log folder shows it, which helps when something goes wrong.
+- **BuildRail has its own icon,** on the window and on the Windows program file.
 
 ### Changed
 
-- **The strip uses far less power when nothing is happening.** It no longer redraws itself many times a second while your builds sit still, so a laptop on battery barely notices it.
-- **The download is smaller.**
+- **The strip uses far less power when nothing is happening.** It no longer redraws itself on a timer while your builds sit still, and it no longer rewrites its saved state every minute, so a laptop on battery barely notices it.
+- **The building mark holds still** unless you turn on Animation.
+- **Import and export open your system's own file picker,** instead of asking you to type a path.
+- **The Linux download is 8 % smaller.**
+
+### Removed
+
+- **The `--renderer` option and the `BUILDRAIL_RENDERER` setting.** BuildRail always draws with OpenGL now. A shortcut that still passes `--renderer` keeps working and only prints a note.
 
 ### Fixed
 
-- **`--help` shows in a terminal on Windows.** Before, running `buildrail --help` from PowerShell or Command Prompt printed nothing.
+- **Pasting a token works.** Before, BuildRail could not reach the clipboard, so pasting into the token field did nothing.
+- **`--help` and `--version` show in a terminal on Windows.** Before, running them from PowerShell or Command Prompt printed nothing.
 - **Starting BuildRail a second time no longer opens a second strip.** The copy that is already running stays the only one.
 
 ## [0.2.0] - 2026-11-17
