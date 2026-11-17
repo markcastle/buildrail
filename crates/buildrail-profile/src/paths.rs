@@ -15,6 +15,8 @@ pub const PROFILE_FILE: &str = "profile.toml";
 pub const DEVICE_PREFS_FILE: &str = "device.toml";
 /// File name of the snapshot cache inside [`AppPaths::cache_dir`].
 pub const SNAPSHOT_CACHE_FILE: &str = "snapshots.json";
+/// Name of the log folder inside the local data (or given) directory.
+pub const LOGS_DIR: &str = "logs";
 
 /// The OS gave no home directory, so no standard locations exist.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -28,6 +30,7 @@ pub struct NoHomeDir;
 /// | profile | `~/.config/buildrail` | `~/Library/Application Support/dev.BuildRail.BuildRail` | `%APPDATA%\BuildRail\BuildRail\config` (roaming) |
 /// | device prefs | `~/.config/buildrail` | same as profile | `%LOCALAPPDATA%\BuildRail\BuildRail\config` (never roams) |
 /// | cache | `~/.cache/buildrail` | `~/Library/Caches/dev.BuildRail.BuildRail` | `%LOCALAPPDATA%\BuildRail\BuildRail\cache` |
+/// | logs | `~/.local/share/buildrail/logs` | `~/Library/Application Support/dev.BuildRail.BuildRail/logs` | `%LOCALAPPDATA%\BuildRail\BuildRail\data\logs` |
 ///
 /// Device preferences use the *local* config directory so a roaming Windows
 /// profile cannot carry one machine's monitor choice to another.
@@ -36,6 +39,7 @@ pub struct AppPaths {
     profile_dir: PathBuf,
     device_dir: PathBuf,
     cache_dir: PathBuf,
+    logs_dir: PathBuf,
 }
 
 impl AppPaths {
@@ -46,20 +50,37 @@ impl AppPaths {
             dirs.config_dir(),
             dirs.config_local_dir(),
             dirs.cache_dir(),
-        ))
+        )
+        .with_logs_dir(dirs.data_local_dir().join(LOGS_DIR)))
     }
 
-    /// Explicit directories, for tests and portable installs.
+    /// Explicit directories, for tests and portable installs. Logs go in
+    /// `logs` under `device_dir` unless [`with_logs_dir`](Self::with_logs_dir)
+    /// says otherwise.
     pub fn from_dirs(
         profile_dir: impl Into<PathBuf>,
         device_dir: impl Into<PathBuf>,
         cache_dir: impl Into<PathBuf>,
     ) -> Self {
+        let device_dir = device_dir.into();
         Self {
             profile_dir: profile_dir.into(),
-            device_dir: device_dir.into(),
+            logs_dir: device_dir.join(LOGS_DIR),
+            device_dir,
             cache_dir: cache_dir.into(),
         }
+    }
+
+    /// The same locations with the log folder at `logs_dir`.
+    pub fn with_logs_dir(mut self, logs_dir: impl Into<PathBuf>) -> Self {
+        self.logs_dir = logs_dir.into();
+        self
+    }
+
+    /// Directory holding the log files (never synchronised, never
+    /// exported).
+    pub fn logs_dir(&self) -> &Path {
+        &self.logs_dir
     }
 
     /// Directory holding the profile.
@@ -128,6 +149,11 @@ mod tests {
         assert_eq!(paths.profile_dir(), dir.path().join("p"));
         assert_eq!(paths.device_dir(), dir.path().join("d"));
         assert_eq!(paths.cache_dir(), dir.path().join("c"));
+        assert_eq!(paths.logs_dir(), dir.path().join("d/logs"));
+        assert_eq!(
+            paths.clone().with_logs_dir(dir.path().join("l")).logs_dir(),
+            dir.path().join("l")
+        );
         assert_eq!(paths.profile_file(), dir.path().join("p/profile.toml"));
         assert_eq!(paths.device_prefs_file(), dir.path().join("d/device.toml"));
         assert_eq!(
@@ -150,6 +176,7 @@ mod tests {
             Ok(paths) => {
                 assert!(paths.profile_file().ends_with(PROFILE_FILE));
                 assert!(paths.profile_dir().is_absolute());
+                assert!(paths.logs_dir().ends_with(LOGS_DIR));
             }
             Err(err) => assert_eq!(err, NoHomeDir),
         }

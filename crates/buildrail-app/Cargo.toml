@@ -19,22 +19,35 @@ buildrail-providers.workspace = true
 async-trait.workspace = true
 chrono.workspace = true
 thiserror.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["signal"] }
 tracing.workspace = true
 tracing-subscriber = { version = "0.3", default-features = false, features = ["env-filter", "fmt", "ansi", "std"] }
+# The rotating log file (at most five, under the local data directory).
+tracing-appender = "0.2"
+# Native open/save dialogs for profile import and export. On Linux they go
+# through the XDG desktop portal (no GTK needed), driven by our tokio runtime.
+rfd = { version = "0.15", default-features = false, features = ["xdg-portal", "tokio"] }
 raw-window-handle = { version = "0.6", features = ["std"] }
 tempfile = "3"
 # Checks a system font file before handing it to egui (egui panics on a
 # font it cannot parse); the same parser and version egui uses.
 skrifa = { version = "0.44", default-features = false, features = ["std"] }
+# glow (OpenGL) only: it is what runs on every machine BuildRail has met,
+# and leaving wgpu out roughly halves the binary. `clipboard` makes copy and
+# paste reach the system clipboard (pasting a token, copying a profile).
 eframe = { version = "0.37", default-features = false, features = [
     "accesskit",
+    "clipboard",
     "default_fonts",
     "glow",
-    "wgpu",
     "wayland",
     "x11",
 ] }
+
+[build-dependencies]
+# Embeds the icon and version information in the Windows exe. Only used
+# when building for Windows on Windows; see build.rs.
+winresource = { version = "0.1", default-features = false }
 
 [dev-dependencies]
 egui_kittest = { version = "0.37", features = ["snapshot"] }

@@ -107,6 +107,7 @@ mod appbar;
 mod linux;
 pub mod session;
 pub mod strut;
+mod window_ref;
 
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -121,6 +122,7 @@ pub use appbar::{
 };
 #[cfg(x11_platform)]
 pub use linux::LinuxDock;
+pub use window_ref::WindowRef;
 
 /// Reserves (or declines to reserve) the bottom screen edge for the strip.
 /// See the module docs for per-OS behaviour and how the UI wires it.

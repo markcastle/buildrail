@@ -5,8 +5,34 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+build = "build.rs"
+
+[features]
+# Default is the pure, I/O-free core (manifest, keys, signatures, version
+# policy) so the release-time signing tool stays small. The app enables
+# `client` for the HTTP feed, the installer and the scheduler.
+default = []
+client = ["dep:async-trait", "dep:reqwest", "dep:flate2"]
 
 [dependencies]
+base64 = "0.23.1"
+ed25519-dalek = { version = "3.0.0", default-features = false, features = ["zeroize"] }
+semver = "1.0.28"
+serde.workspace = true
+serde_json.workspace = true
+sha2 = "0.11.1"
+thiserror.workspace = true
+
+async-trait = { workspace = true, optional = true }
+flate2 = { version = "1.1.11", optional = true }
+# Same version and TLS backend as buildrail-providers so the app links one
+# HTTP/TLS stack; the features here are a subset of the providers' ones.
+reqwest = { version = "0.13.5", default-features = false, features = ["rustls"], optional = true }
+
+[dev-dependencies]
+tempfile = "3.27.0"
+tokio = { workspace = true, features = ["test-util"] }
+wiremock = "0.6.5"
 
 [lints]
 workspace = true

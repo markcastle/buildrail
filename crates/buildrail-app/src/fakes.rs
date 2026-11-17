@@ -8,6 +8,7 @@
 //! for the provider side.
 
 use std::collections::{HashMap, VecDeque};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use async_trait::async_trait;
@@ -16,10 +17,11 @@ use buildrail_core::ports::{Clock, ProviderError, RunSource, Secret};
 use buildrail_core::refresh::SourceRegistry;
 use buildrail_platform::autostart::InMemoryAutostart;
 use buildrail_platform::credentials::InMemoryCredentialStore;
+use buildrail_platform::folders::RecordingFolderOpener;
 use buildrail_platform::url_opener::RecordingUrlOpener;
 use buildrail_profile::AppPaths;
 
-use crate::app::{Catalogs, Services};
+use crate::app::{Catalogs, FileDialog, Services};
 use buildrail_providers::catalog::{
     CloudflareAccount, CloudflareAccounts, CloudflareTokenCheck, CloudflareTokenStatus,
     CloudflareWorker, CloudflareWorkers, GitHubBranch, GitHubBranches, GitHubIdentity,
@@ -325,6 +327,47 @@ impl CloudflareWorkers for FakeCatalog {
     }
 }
 
+/// Open and save dialogs that answer from a script: each call takes the
+/// next queued answer (`None` = the person cancelled), and cancels once
+/// the script runs out. Records what was asked.
+#[derive(Debug, Default)]
+pub struct ScriptedFileDialog {
+    answers: Mutex<VecDeque<Option<PathBuf>>>,
+    asked: Mutex<Vec<String>>,
+}
+
+impl ScriptedFileDialog {
+    /// Cancels every dialog.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Queues the answer to the next dialog.
+    pub fn answer(&self, path: Option<PathBuf>) {
+        lock(&self.answers).push_back(path);
+    }
+
+    /// What was asked so far: `"open"`, or `"save <suggested name>"`.
+    pub fn asked(&self) -> Vec<String> {
+        lock(&self.asked).clone()
+    }
+
+    fn next(&self, what: String) -> Option<PathBuf> {
+        lock(&self.asked).push(what);
+        lock(&self.answers).pop_front().flatten()
+    }
+}
+
+impl FileDialog for ScriptedFileDialog {
+    fn open_profile(&self) -> Option<PathBuf> {
+        self.next("open".to_owned())
+    }
+
+    fn save_profile(&self, suggested_name: &str) -> Option<PathBuf> {
+        self.next(format!("save {suggested_name}"))
+    }
+}
+
 /// Every port faked, with handles kept so a test can script providers,
 /// inspect stored credentials and opened URLs, and move the clock.
 #[derive(Clone)]
@@ -343,6 +386,10 @@ pub struct FakeWorld {
     pub urls: Arc<RecordingUrlOpener>,
     /// Launch-at-login.
     pub autostart: Arc<InMemoryAutostart>,
+    /// Open and save dialogs.
+    pub dialogs: Arc<ScriptedFileDialog>,
+    /// Records opened folders.
+    pub folders: Arc<RecordingFolderOpener>,
 }
 
 impl FakeWorld {
@@ -357,6 +404,8 @@ impl FakeWorld {
             clock: Arc::new(ManualClock::new(now)),
             urls: Arc::new(RecordingUrlOpener::new()),
             autostart: Arc::new(InMemoryAutostart::new(false)),
+            dialogs: Arc::new(ScriptedFileDialog::new()),
+            folders: Arc::new(RecordingFolderOpener::new()),
         }
     }
 
@@ -374,6 +423,9 @@ impl FakeWorld {
             autostart: Some(self.autostart.clone()),
             profile_store: paths.profile_store(),
             prefs_store: paths.device_prefs_store(),
+            dialogs: self.dialogs.clone(),
+            folders: self.folders.clone(),
+            logs_dir: Some(paths.logs_dir().to_owned()),
         }
     }
 }

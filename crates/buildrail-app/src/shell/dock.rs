@@ -10,6 +10,10 @@
 //!   shutdown(): release the reserved edge
 //! ```
 //!
+//! The controller is pure policy over ports and never paints: the
+//! [`ShellWorker`](super::ShellWorker) runs it off the UI thread and only
+//! wakes the UI when a call returns commands.
+//!
 //! Positions of the floating window are persisted in logical pixels
 //! relative to the chosen monitor's top-left corner
 //! ([`buildrail_profile::Placement::Floating`]), so they survive scale
@@ -19,6 +23,7 @@ use std::time::{Duration, Instant};
 
 use buildrail_platform::dock::{
     DockError, DockEvent, DockOutcome, EdgeDock, ReservationGuarantee, UnsupportedReason,
+    WindowRef,
 };
 use buildrail_platform::fullscreen::FullscreenProbe;
 use buildrail_platform::geometry::{
@@ -27,7 +32,6 @@ use buildrail_platform::geometry::{
 };
 use buildrail_platform::monitors::MonitorSource;
 use buildrail_profile::{DevicePrefs, Placement, Position};
-use raw_window_handle::RawWindowHandle;
 
 /// Size of the compact movable window.
 pub const FLOAT_SIZE: LogicalSize = LogicalSize {
@@ -118,7 +122,7 @@ pub struct DockController {
     dock: Box<dyn EdgeDock>,
     fullscreen: Box<dyn FullscreenProbe>,
     monitors: Box<dyn MonitorSource>,
-    window: Option<RawWindowHandle>,
+    window: Option<WindowRef>,
     mode: ShellMode,
     /// Monitor the strip is on (fullscreen checks, dock updates).
     monitor: Option<MonitorInfo>,
@@ -175,7 +179,7 @@ impl DockController {
     /// Places the strip for the first time.
     pub fn start(
         &mut self,
-        window: RawWindowHandle,
+        window: WindowRef,
         prefs: &DevicePrefs,
         now: Instant,
     ) -> Vec<ShellCommand> {
@@ -207,7 +211,15 @@ impl DockController {
         self.anchor = Some(target.clone());
         let remembered = match prefs.placement {
             Placement::DockedBottom => {
-                match self.dock.reserve(window, &target, STRIP_HEIGHT_LOGICAL) {
+                let Some(raw) = window.to_raw() else {
+                    let reason = window
+                        .unsupported_reason()
+                        .unwrap_or(UnsupportedReason::UnsupportedWindowHandle);
+                    tracing::info!(%reason, "this window cannot be docked");
+                    self.release();
+                    return self.float(&monitors, &target, None, FloatReason::Unsupported(reason));
+                };
+                match self.dock.reserve(raw, &target, STRIP_HEIGHT_LOGICAL) {
                     Ok(DockOutcome::Reserved { rect, guarantee }) => {
                         tracing::info!(%rect, ?guarantee, "strip docked");
                         self.mode = ShellMode::Docked { rect, guarantee };
@@ -399,7 +411,7 @@ impl DockController {
             }
             Err(DockError::NotReserved) => {
                 // The reservation was lost (e.g. Explorer restarted): take it again.
-                let Some(window) = self.window else {
+                let Some(window) = self.window.and_then(WindowRef::to_raw) else {
                     return Vec::new();
                 };
                 match self.dock.reserve(window, &monitor, STRIP_HEIGHT_LOGICAL) {
@@ -451,12 +463,12 @@ mod tests {
     use buildrail_platform::fullscreen::{FakeFullscreenProbe, FullscreenState};
     use buildrail_platform::monitors::{MonitorError, StaticMonitors};
     use buildrail_profile::MonitorChoice;
-    use raw_window_handle::XcbWindowHandle;
+    use raw_window_handle::RawWindowHandle;
 
     use super::*;
 
-    fn window() -> RawWindowHandle {
-        RawWindowHandle::Xcb(XcbWindowHandle::new(NonZeroU32::new(42).unwrap()))
+    fn window() -> WindowRef {
+        WindowRef::Xcb(NonZeroU32::new(42).unwrap())
     }
 
     fn monitor(id: &str, x: i32, scale: f64, primary: bool) -> MonitorInfo {
@@ -771,6 +783,24 @@ mod tests {
         fn monitors(&self) -> Result<Vec<MonitorInfo>, MonitorError> {
             Err(MonitorError("gone".into()))
         }
+    }
+
+    #[test]
+    fn undockable_windows_float_with_the_reason() {
+        let mut f = setup(ScriptedDock::reserving(), two_monitors());
+        let commands = f.shell.start(WindowRef::Wayland, &DevicePrefs::default(), f.t0);
+        assert!(matches!(commands.first(), Some(ShellCommand::Place(_))));
+        assert_eq!(
+            f.shell.mode(),
+            &ShellMode::Floating {
+                rect: match commands[0] {
+                    ShellCommand::Place(rect) => rect,
+                    _ => unreachable!(),
+                },
+                reason: FloatReason::Unsupported(UnsupportedReason::Wayland),
+            }
+        );
+        assert!(f.dock.calls().is_empty(), "the dock is never asked");
     }
 
     #[test]

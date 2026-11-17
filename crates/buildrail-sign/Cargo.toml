@@ -7,7 +7,16 @@ rust-version.workspace = true
 license.workspace = true
 publish = false
 
+[[bin]]
+name = "buildrail-sign"
+path = "src/main.rs"
+
 [dependencies]
+buildrail-update.workspace = true
+getrandom = "0.4.3"
+
+[dev-dependencies]
+tempfile = "3.27.0"
 
 [lints]
 workspace = true

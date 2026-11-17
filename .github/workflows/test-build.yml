@@ -1,0 +1,66 @@
+name: Test build
+
+# Every pull request gets a Windows build to try before it is merged: open
+# the run from the pull request's checks, scroll to Artifacts, and download
+# the zip. It holds buildrail.exe, a "Try the demo.cmd" to double-click, the
+# README and the changelog. The "Run workflow" button does the same for any
+# branch.
+#
+# This is a try-it build, not a release: it has no update signing key, so it
+# never updates itself, and nothing is published.
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: test-build-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  windows:
+    name: Windows test build
+    runs-on: windows-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build --release --locked -p buildrail-app
+
+      - name: Package
+        id: package
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          if [ -n "$PR_NUMBER" ]; then label="pr$PR_NUMBER-${HEAD_SHA:0:7}"; else label="${GITHUB_REF_NAME//\//-}-${HEAD_SHA:0:7}"; fi
+          name="buildrail-$label-windows-x86_64"
+          mkdir "$name"
+          cp target/release/buildrail.exe README.md CHANGELOG.md "$name/"
+          printf '@echo off\r\nstart "" "%%~dp0buildrail.exe" --demo\r\n' > "$name/Try the demo.cmd"
+          7z a -tzip "$name.zip" "$name" > /dev/null
+          echo "zip=$name.zip" >> "$GITHUB_OUTPUT"
+          ls -l "$name" "$name.zip"
+
+      # Uploaded as the zip itself (archive: false), so the download is the
+      # zip and not a zip inside a zip.
+      - uses: actions/upload-artifact@v7
+        with:
+          path: ${{ steps.package.outputs.zip }}
+          archive: false
+          if-no-files-found: error
+          retention-days: 14

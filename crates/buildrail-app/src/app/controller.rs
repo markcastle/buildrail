@@ -16,6 +16,22 @@
 //!   run inline; their results are queued for the next poll so every
 //!   command answers the same way.
 //!
+//! # Repaints
+//!
+//! The UI paints only when asked. The controller asks (through the
+//! [`RepaintFn`]) when a job finishes and when the refresh engine publishes
+//! snapshots that change what the strip *says*
+//! ([`snapshots_differ_visibly`]); a refresh that merely confirms
+//! unchanged data asks for nothing.
+//!
+//! # Restarting
+//!
+//! [`AppController::prepare_for_restart`] gets the process ready to be
+//! replaced (a self-update): it stops the refresh engine, writes the
+//! preferences and the snapshot cache, and releases everything registered
+//! with the [`Lifecycle`] (the docked screen edge, the single-instance
+//! lock).
+//!
 //! # Consistency
 //!
 //! Every profile change follows *save, then adopt, then `set_watches`*: the
@@ -26,6 +42,7 @@
 
 use std::collections::VecDeque;
 use std::future::Future;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
@@ -35,10 +52,12 @@ use buildrail_core::ports::{CredentialReader, Secret, SnapshotCache};
 use buildrail_core::refresh::{RefreshEngine, RefreshHandle, RefreshPolicy};
 use buildrail_core::selection::select_latest;
 use buildrail_profile::{DevicePrefs, LocalConnection, Profile, WatchDraft};
+use thiserror::Error;
 use tokio::runtime::Handle;
 
+use super::lifecycle::Lifecycle;
 use super::ports::Services;
-use crate::presentation::StripModel;
+use crate::presentation::{snapshots_differ_visibly, StripModel};
 use crate::settings::{
     watches_using, CatalogItems, CatalogQuery, Command, ConnectError, ConnectRequest, Event,
     LoadError, NewConnection, ProfileEdit, Ticket,
@@ -67,6 +86,15 @@ impl Repainter {
             f();
         }
     }
+}
+
+/// What [`AppController::prepare_for_restart`] could not do. The restart
+/// may still go ahead; the caller decides.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[error("not everything was ready for the restart: {}", .problems.join("; "))]
+pub struct RestartError {
+    /// One line per problem.
+    pub problems: Vec<String>,
 }
 
 /// What a job sends back. Most results are final [`Event`]s; connecting
@@ -107,6 +135,8 @@ pub struct AppController {
     pending_jobs: usize,
     ready: VecDeque<Event>,
     repaint: Repainter,
+    cache: Arc<dyn SnapshotCache>,
+    lifecycle: Lifecycle,
 }
 
 impl AppController {
@@ -142,7 +172,7 @@ impl AppController {
             services.sources.clone(),
             reader,
             services.clock.clone(),
-            cache,
+            cache.clone(),
             policy,
         );
         runtime.spawn(engine.run());
@@ -151,8 +181,13 @@ impl AppController {
         let mut changes = refresh.subscribe();
         let on_change = repaint.clone();
         runtime.spawn(async move {
+            let mut shown = changes.borrow_and_update().clone();
             while changes.changed().await.is_ok() {
-                on_change.request();
+                let next = changes.borrow_and_update().clone();
+                if snapshots_differ_visibly(&shown, &next) {
+                    shown = next;
+                    on_change.request();
+                }
             }
         });
 
@@ -170,6 +205,8 @@ impl AppController {
             pending_jobs: 0,
             ready: VecDeque::new(),
             repaint,
+            cache,
+            lifecycle: Lifecycle::new(),
         };
         controller.push_watches();
         controller
@@ -226,6 +263,17 @@ impl AppController {
         self.repaint.set(repaint);
     }
 
+    /// What the app holds that a restart or exit must release. Register
+    /// things with [`Lifecycle::hold`].
+    pub fn lifecycle(&self) -> &Lifecycle {
+        &self.lifecycle
+    }
+
+    /// Where log files are written, if they are.
+    pub fn logs_dir(&self) -> Option<&Path> {
+        self.services.logs_dir.as_deref()
+    }
+
     // -------------------------------------------------------------- actions
 
     /// Opens a run page. Only `https://` links are opened (the platform
@@ -247,6 +295,60 @@ impl AppController {
     /// Stops the refresh engine.
     pub fn shutdown(&self) {
         self.refresh.shutdown();
+    }
+
+    /// Gets ready for this process to be replaced by a new one (the
+    /// self-updater calls this before swapping the executable and
+    /// restarting):
+    ///
+    /// 1. stops the refresh engine, so nothing more is fetched or written;
+    /// 2. writes the device preferences (unless the file could not be read
+    ///    at start: a damaged file is never overwritten behind the
+    ///    person's back) and the snapshot cache, so the new process starts
+    ///    from exactly what this one showed;
+    /// 3. releases everything in the [`Lifecycle`]: the docked screen edge
+    ///    and the single-instance lock, so the new process can take both.
+    ///
+    /// Safe to call more than once; the window should close afterwards.
+    pub fn prepare_for_restart(&self) -> Result<(), RestartError> {
+        tracing::info!("preparing to restart");
+        let mut problems = Vec::new();
+        self.refresh.shutdown();
+        if self.prefs_error.is_none() {
+            if let Err(error) = self.services.prefs_store.save(&self.prefs) {
+                problems.push(format!("preferences: {error}"));
+            }
+        }
+        self.cache.save(&self.refresh.snapshots());
+        problems.extend(self.lifecycle.release_all());
+        if problems.is_empty() {
+            Ok(())
+        } else {
+            Err(RestartError { problems })
+        }
+    }
+
+    /// Asks where the profile to import is (system open dialog). `None`
+    /// when the person cancelled.
+    pub fn choose_import_file(&self) -> Option<PathBuf> {
+        self.services.dialogs.open_profile()
+    }
+
+    /// Asks where to export the profile (system save dialog). `None` when
+    /// the person cancelled.
+    pub fn choose_export_file(&self) -> Option<PathBuf> {
+        self.services.dialogs.save_profile("builds.toml")
+    }
+
+    /// Shows the log folder in the file manager.
+    pub fn open_log_folder(&self) -> Result<(), String> {
+        let dir = self
+            .logs_dir()
+            .ok_or_else(|| "BuildRail is not writing a log file.".to_owned())?;
+        self.services.folders.open_folder(dir).map_err(|error| {
+            tracing::warn!(%error, "could not open the log folder");
+            error.to_string()
+        })
     }
 
     /// Changes device preferences: applies `change` to a copy, saves it

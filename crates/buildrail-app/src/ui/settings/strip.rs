@@ -146,6 +146,13 @@ impl SettingsWindow {
                     }
                 });
             }
+            g.row(
+                "Animation",
+                Some("Turns the in-progress mark while a build runs. Off, nothing on the strip moves."),
+                |ui| {
+                    toggle(ui, tokens, &mut prefs.animation, "Animation");
+                },
+            );
             g.label("Startup");
             g.row(
                 "Start at login",

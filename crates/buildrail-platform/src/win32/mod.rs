@@ -6,8 +6,11 @@
 #![warn(clippy::undocumented_unsafe_blocks)]
 
 pub(crate) mod appbar;
+pub(crate) mod console;
 pub(crate) mod fullscreen;
+pub(crate) mod instance;
 pub(crate) mod monitors;
+pub(crate) mod motion;
 pub(crate) mod registry;
 
 use windows_sys::Win32::Foundation::{HWND, RECT};

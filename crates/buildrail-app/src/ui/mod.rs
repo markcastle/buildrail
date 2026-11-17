@@ -7,6 +7,7 @@
 //!   behind the [`fonts::FontSource`] seam.
 //! * [`style`] – the tokens applied to egui's own style.
 //! * [`glyphs`] – vector glyphs in the lucide manner and provider marks.
+//! * [`icon`] – the BuildRail mark (window icon; source of the `.ico`).
 //! * [`widgets`] – small widgets, one per Task Rail component.
 //! * [`strip`] – the 24 px strip widget (entries, overflow, detail popup).
 //! * [`settings`] – the Settings window (navigation, pages, wizard, import).
@@ -18,6 +19,7 @@
 pub mod app;
 pub mod fonts;
 pub mod glyphs;
+pub mod icon;
 pub mod settings;
 pub mod strip;
 pub mod style;
@@ -25,6 +27,6 @@ pub mod theme;
 pub mod widgets;
 pub mod window;
 
-pub use app::{BuildRailUi, FrameOutput};
+pub use app::{BuildRailUi, FrameCounter, FrameOutput};
 pub use strip::{StripAction, StripView, STRIP_HEIGHT};
 pub use theme::{Tokens, DARK, LIGHT};

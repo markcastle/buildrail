@@ -1,0 +1,164 @@
+name: Roll back
+
+# Actions → Roll back → Run workflow, on main. Give the last good version and
+# one sentence on why.
+#
+# Why a rollback is a new, HIGHER release and not a deletion: an installed
+# copy of BuildRail only ever updates to a version higher than its own. A
+# copy that took the bad 0.5.0 would ignore 0.4.2 for ever, however the
+# releases are arranged. So the good code goes out again as 0.5.1, and every
+# copy, including the ones that took 0.5.0, moves to it.
+#
+# What it does:
+#
+# 1. Withdraws every release newer than the good one by marking it a
+#    pre-release. GitHub's "latest" skips pre-releases, so at once the feed
+#    (releases/latest/download/latest.json) and the one-line installers hand
+#    out the good version again, and copies that had not yet updated are no
+#    longer offered the bad one.
+# 2. Puts the good version's tree back on main as one commit, keeping the
+#    release tooling (.github, crates/xtask, CHANGELOG.md, scripts,
+#    docs/releasing.md) as it is today, since that is what is running now.
+#    The changelog's Unreleased becomes one line saying what happened and
+#    why (the lines that were there describe work this takes off main).
+# 3. Calls the Release workflow for the next patch number. CI is not checked:
+#    the code was released before, and a commit pushed by a workflow does
+#    not start CI anyway.
+#
+# Work that landed after the good version is gone from main afterwards, not
+# lost: revert the "Roll back to" commit to bring it back (changelog lines
+# included), fix it, and release again.
+
+on:
+  workflow_dispatch:
+    inputs:
+      to:
+        description: 'The last good version, such as 0.4.2'
+        required: true
+        type: string
+      reason:
+        description: 'Why, in one sentence. It goes in the changelog and the release notes.'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  actions: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  restore:
+    name: Restore ${{ inputs.to }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # Job-level, not workflow-level: the Release workflow called below holds
+    # the same group, and a caller holding it at the top level would wait on
+    # its own callee (GitHub cancels that as a deadlock).
+    concurrency:
+      group: release
+      cancel-in-progress: false
+    outputs:
+      next: ${{ steps.versions.outputs.next }}
+      commit: ${{ steps.restore.outputs.commit }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Check the versions
+        id: versions
+        env:
+          TO: ${{ inputs.to }}
+          REASON: ${{ inputs.reason }}
+        run: |
+          if [ "$GITHUB_REF" != "refs/heads/main" ]; then
+            echo "::error::Roll back from main, not from $GITHUB_REF_NAME. Pick main under \"Use workflow from\"."
+            exit 1
+          fi
+          if ! [[ "$TO" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "::error::\"$TO\" is not a version. Use major.minor.patch, such as 0.4.2."
+            exit 1
+          fi
+          if [ -z "${REASON// /}" ] || [[ "$REASON" == *$'\n'* ]]; then
+            echo "::error::Say why in one sentence on one line."
+            exit 1
+          fi
+          if ! git rev-parse -q --verify "refs/tags/v$TO" >/dev/null; then
+            echo "::error::There is no release v$TO."
+            exit 1
+          fi
+          # A tree from before self-update would strand everyone who takes
+          # the roll-forward: it could never update again.
+          if ! git cat-file -e "v$TO:crates/buildrail-update/Cargo.toml" 2>/dev/null; then
+            echo "::error::v$TO is from before BuildRail could update itself. Rolling back to it would leave every copy that takes it unable to update again. Pick a later version, or fix forward."
+            exit 1
+          fi
+          highest=$(cargo run --quiet -p xtask -- highest-tag)
+          if [ "$TO" = "$highest" ]; then
+            echo "::error::$TO is already the newest release. There is nothing to roll back."
+            exit 1
+          fi
+          next="${highest%.*}.$(( ${highest##*.} + 1 ))"
+          echo "next=$next" >> "$GITHUB_OUTPUT"
+          echo "Rolling back from $highest to $TO. The roll-forward release will be $next."
+          {
+            echo "## Rolling back to $TO"
+            echo
+            echo "From $highest. The good code goes out again as $next. Why: $REASON"
+          } >> "$GITHUB_STEP_SUMMARY"
+          # The run built xtask, which may have touched Cargo.lock; the
+          # restore below replaces the tree anyway.
+          git checkout -- .
+
+      - name: Withdraw the releases newer than ${{ inputs.to }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TO: ${{ inputs.to }}
+        run: |
+          for tag in $(git tag -l 'v*' | sort -V); do
+            v="${tag#v}"
+            [ "$(printf '%s\n%s\n' "$TO" "$v" | sort -V | tail -1)" = "$v" ] && [ "$v" != "$TO" ] || continue
+            if gh release edit "$tag" --prerelease --latest=false >/dev/null 2>&1; then
+              echo "Withdrew $tag (now a pre-release)."
+              echo "- Withdrew $tag." >> "$GITHUB_STEP_SUMMARY"
+            else
+              echo "No published release for $tag; nothing to withdraw."
+            fi
+          done
+          echo "Latest is now $(gh release view --json tagName --jq .tagName)."
+
+      - name: Put the code of ${{ inputs.to }} back on main
+        id: restore
+        env:
+          TO: ${{ inputs.to }}
+          REASON: ${{ inputs.reason }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # The whole tree as it was at the good version, then the release
+          # tooling back to today's, since it is what is running right now.
+          git read-tree --reset -u "v$TO"
+          git checkout HEAD -- .github crates/xtask CHANGELOG.md scripts docs/releasing.md
+          # Unreleased described work this takes off main, so it becomes the
+          # one line saying what happened. Building xtask also brings
+          # Cargo.lock into line with the restored crates.
+          cargo run --quiet -p xtask -- changelog note --clear "Rolled back to the code of $TO. $REASON"
+          git add -A
+          git commit -q -m "Roll back to v$TO" -m "$REASON" -m "Every release newer than v$TO is withdrawn. The next release carries this code under a higher number so that copies which already updated move too."
+          git show --stat --format='%h %s' HEAD
+          git push origin HEAD:refs/heads/main
+          echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+  release:
+    name: Release
+    needs: restore
+    uses: ./.github/workflows/release.yml
+    with:
+      version: ${{ needs.restore.outputs.next }}
+      skip_ci_check: true
+      commit: ${{ needs.restore.outputs.commit }}
+    secrets: inherit

@@ -1,6 +1,8 @@
 //! The Share page: export your pinned builds for a teammate, or import
 //! theirs (read, map their connections to yours, review, replace).
 
+use std::path::Path;
+
 use buildrail_profile::AtomicFile;
 use eframe::egui::{self, Ui};
 
@@ -43,9 +45,21 @@ impl SettingsWindow {
                     }
                 },
             );
-            g.stack(
+            g.row(
                 "Save to a file",
-                Some("Where to save it, for example builds.toml in your documents folder."),
+                Some("Choose where to save it, for example builds.toml in your documents folder."),
+                |ui| {
+                    if button(ui, tokens, ButtonKind::Plain, "Save as…", true, false).clicked() {
+                        if let Some(path) = controller.choose_export_file() {
+                            self.export_path = path.display().to_string();
+                            self.share_message = Some(save_profile(&path, &text));
+                        }
+                    }
+                },
+            );
+            g.stack(
+                "Or type where to save it",
+                None,
                 |ui| {
                     ui.horizontal(|ui| {
                         let width = (ui.available_width() - 100.0).max(160.0);
@@ -56,14 +70,7 @@ impl SettingsWindow {
                         let ready = !self.export_path.trim().is_empty();
                         if button(ui, tokens, ButtonKind::Plain, "Export", ready, false).clicked() {
                             let path = self.export_path.trim().to_owned();
-                            self.share_message =
-                                Some(match AtomicFile::new(&path).write(text.as_bytes()) {
-                                    Ok(()) => (Tone::Success, format!("Saved the profile to {path}.")),
-                                    Err(error) => (
-                                        Tone::Error,
-                                        format!("The profile could not be saved to {path}: {error}. Check the folder exists and you can write to it."),
-                                    ),
-                                });
+                            self.share_message = Some(save_profile(Path::new(&path), &text));
                         }
                     });
                 },
@@ -83,9 +90,26 @@ impl SettingsWindow {
                 let mut text = self.import.text().to_owned();
                 let mut load_error = None;
                 group(ui, tokens, |g| {
-                    g.stack(
+                    g.row(
                         "From a file",
                         Some("A profile a teammate exported, such as builds.toml."),
+                        |ui| {
+                            if button(ui, tokens, ButtonKind::Plain, "Choose file…", true, false)
+                                .clicked()
+                            {
+                                if let Some(path) = controller.choose_import_file() {
+                                    self.import_path = path.display().to_string();
+                                    match read_profile(&path) {
+                                        Ok(text) => push(inputs, ImportInput::SetText(text)),
+                                        Err(error) => load_error = Some(error),
+                                    }
+                                }
+                            }
+                        },
+                    );
+                    g.stack(
+                        "Or type its path",
+                        None,
                         |ui| {
                             ui.horizontal(|ui| {
                                 let width = (ui.available_width() - 90.0).max(160.0);
@@ -98,13 +122,9 @@ impl SettingsWindow {
                                     .clicked()
                                 {
                                     let path = self.import_path.trim().to_owned();
-                                    match std::fs::read_to_string(&path) {
+                                    match read_profile(Path::new(&path)) {
                                         Ok(text) => push(inputs, ImportInput::SetText(text)),
-                                        Err(error) => {
-                                            load_error = Some(format!(
-                                                "{path} could not be read: {error}. Check the path and try again."
-                                            ))
-                                        }
+                                        Err(error) => load_error = Some(error),
                                     }
                                 }
                             });
@@ -250,4 +270,26 @@ impl SettingsWindow {
             push(inputs, ImportInput::Continue);
         }
     }
+}
+
+/// Writes the exported profile to `path`; the message to show.
+fn save_profile(path: &Path, text: &str) -> (Tone, String) {
+    let shown = path.display();
+    match AtomicFile::new(path).write(text.as_bytes()) {
+        Ok(()) => (Tone::Success, format!("Saved the profile to {shown}.")),
+        Err(error) => (
+            Tone::Error,
+            format!("The profile could not be saved to {shown}: {error}. Check the folder exists and you can write to it."),
+        ),
+    }
+}
+
+/// Reads a profile to import from `path`.
+fn read_profile(path: &Path) -> Result<String, String> {
+    std::fs::read_to_string(path).map_err(|error| {
+        format!(
+            "{} could not be read: {error}. Check the path and try again.",
+            path.display()
+        )
+    })
 }

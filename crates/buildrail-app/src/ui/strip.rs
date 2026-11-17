@@ -17,7 +17,11 @@
 //! Hover or keyboard focus reveals an entry's details. The strip window is
 //! only 24 px tall, so details (and the overflow list) open in their own
 //! small, non-activating viewport above the strip; in single-window test
-//! harnesses egui embeds them as windows instead.
+//! harnesses egui embeds them as windows instead. A popup viewport exists
+//! only while it is shown (egui closes an immediate viewport the first
+//! frame it is not drawn), and the strip never asks for frames of its own:
+//! when to paint next is decided by
+//! [`RepaintPlanner`](crate::presentation::RepaintPlanner).
 
 use std::sync::Arc;
 
@@ -77,8 +81,6 @@ pub enum StripAction {
 #[derive(Debug, Default)]
 pub struct StripView {
     overflow_open: bool,
-    /// Animate the running spinner (off in tests so frames settle).
-    pub animate: bool,
 }
 
 struct Measured {
@@ -103,22 +105,26 @@ fn action_for(entry: &StripEntry) -> Option<StripAction> {
 }
 
 impl StripView {
-    /// A strip view with animation on.
+    /// A strip view with nothing open.
     pub fn new() -> Self {
-        Self {
-            overflow_open: false,
-            animate: true,
-        }
+        Self::default()
+    }
+
+    /// `true` while the overflow list is open.
+    pub fn is_overflow_open(&self) -> bool {
+        self.overflow_open
     }
 
     /// Draws the strip in the top `STRIP_HEIGHT` points of `ui` and returns
-    /// what the user asked for. `movable` makes the caption a drag handle.
+    /// what the user asked for. `movable` makes the caption a drag handle;
+    /// `phase` is the in-progress glyph's animation step (`0` = at rest).
     pub fn show(
         &mut self,
         ui: &mut Ui,
         model: &StripModel,
         tokens: &Tokens,
         movable: bool,
+        phase: u32,
     ) -> Vec<StripAction> {
         let mut actions = Vec::new();
         let full = ui.max_rect();
@@ -130,7 +136,6 @@ impl StripView {
             strip.min.y + 0.5,
             Stroke::new(1.0, tokens.line),
         );
-        let time = ui.input(|i| i.time);
         let y = strip.center().y;
 
         // Leading caption (drag handle while floating).
@@ -221,7 +226,6 @@ impl StripView {
         let layout = fit(&model.entries, &widths, SPACING, available, overflow_width);
 
         let mut x = left;
-        let mut animating = false;
         for (index, (entry, m)) in model.entries.iter().zip(&measured).enumerate() {
             if index >= layout.visible {
                 break;
@@ -230,8 +234,7 @@ impl StripView {
                 x += SPACING;
             }
             let rect = Rect::from_min_size(pos2(x, strip.min.y), Vec2::new(m.width, STRIP_HEIGHT));
-            animating |= entry.icon.is_animated();
-            if let Some(action) = self.entry(ui, rect, entry, m, tokens, time) {
+            if let Some(action) = self.entry(ui, rect, entry, m, tokens, phase) {
                 actions.push(action);
             }
             x += m.width;
@@ -271,11 +274,6 @@ impl StripView {
             }
         } else {
             self.overflow_open = false;
-        }
-
-        if animating && self.animate {
-            ui.ctx()
-                .request_repaint_after(std::time::Duration::from_millis(60));
         }
         actions
     }
@@ -331,7 +329,7 @@ impl StripView {
         entry: &StripEntry,
         m: &Measured,
         tokens: &Tokens,
-        time: f64,
+        phase: u32,
     ) -> Option<StripAction> {
         let id = ui.scope_id().with(("entry", entry.watch_id.as_str()));
         let response = ui.interact(rect, id, Sense::click());
@@ -361,7 +359,7 @@ impl StripView {
             entry.icon,
             ink.glyph,
             ground,
-            if self.animate { time } else { 0.0 },
+            phase,
         );
         x += ICON + GAP;
         for part in [&m.label, &m.dot, &m.status] {
@@ -541,7 +539,7 @@ pub fn detail_card(ui: &mut Ui, entry: &StripEntry, tokens: &Tokens) {
                 entry.icon,
                 ink.glyph,
                 tokens.bg_raised,
-                0.0,
+                0,
             );
             let mut job = type_style::LABEL.job(&entry.label, tokens.text);
             job.append(" · ", 0.0, type_style::BODY.format(tokens.text_muted));
@@ -653,7 +651,7 @@ fn overflow_row(ui: &mut Ui, entry: &StripEntry, tokens: &Tokens) -> egui::Respo
         entry.icon,
         ink.glyph,
         ground,
-        0.0,
+        0,
     );
     let x = rect.min.x + PAD + ICON + GAP + 2.0;
     let label_width = label.size().x;

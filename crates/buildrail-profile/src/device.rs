@@ -41,6 +41,10 @@ pub struct DevicePrefs {
     pub monitor: Option<MonitorChoice>,
     /// Docked or floating.
     pub placement: Placement,
+    /// Animate the in-progress glyph on the strip. Off by default: nothing
+    /// on the strip moves unless asked.
+    #[serde(skip_serializing_if = "is_false")]
+    pub animation: bool,
     /// Local provider connections by alias. Secrets are *not* here: they
     /// live in the OS credential store under the same alias.
     pub connections: BTreeMap<ConnectionAlias, LocalConnection>,
@@ -54,9 +58,14 @@ impl Default for DevicePrefs {
             scale: None,
             monitor: None,
             placement: Placement::DockedBottom,
+            animation: false,
             connections: BTreeMap::new(),
         }
     }
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 /// Colour theme preference.
@@ -231,6 +240,7 @@ mod tests {
             placement: Placement::Floating {
                 position: Some(Position { x: -1200, y: 40 }),
             },
+            animation: true,
             connections: BTreeMap::new(),
         };
         prefs.connections.insert(
@@ -286,6 +296,13 @@ ignored = true
 "#;
         let prefs = DevicePrefs::decode(text).unwrap();
         assert_eq!(prefs.theme, Theme::Light);
+        assert!(!prefs.animation, "absent means off");
+        assert!(!DevicePrefs::default().encode().unwrap().contains("animation"));
+        assert!(
+            DevicePrefs::decode("version = 1\nanimation = true\n")
+                .unwrap()
+                .animation
+        );
         assert_eq!(
             prefs.placement,
             Placement::Floating {

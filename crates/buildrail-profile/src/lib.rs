@@ -111,6 +111,7 @@
 //! launch_at_startup = true
 //! theme = "system"            # "system" | "light" | "dark"
 //! scale = 1.25                # optional override, 0.5–4.0
+//! animation = true            # optional; animate the in-progress glyph
 //!
 //! [monitor]                   # optional; absent means the primary monitor
 //! id = '\\.\DISPLAY2'
