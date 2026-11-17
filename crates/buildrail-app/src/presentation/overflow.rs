@@ -121,6 +121,7 @@ mod tests {
             stale: false,
             needs_reconnect: false,
             details: vec![],
+            hint: None,
             accessible_name: "x".into(),
             url: None,
         }

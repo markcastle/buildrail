@@ -172,7 +172,7 @@ impl ManageList {
                 };
                 if !fits {
                     self.message = Some(format!(
-                        "\"{connection}\" is not a matching connection on this device."
+                        "“{connection}” is not a matching connection on this device. Choose one for the same provider."
                     ));
                     return Vec::new();
                 }
@@ -187,7 +187,7 @@ impl ManageList {
                 let users = watches_using(ctx.profile, &alias);
                 if !users.is_empty() {
                     self.message = Some(format!(
-                        "\"{alias}\" is still used by {}. Remove those builds or switch them to another connection first.",
+                        "“{alias}” is still used by {}. Remove those builds or switch them to another connection first.",
                         users.join(", ")
                     ));
                     return Vec::new();
@@ -206,7 +206,7 @@ impl ManageList {
             if let Some(connection) = flow.on_event(event) {
                 self.reconnecting = None;
                 self.message = Some(format!(
-                    "Reconnected \"{}\". Refreshing now.",
+                    "Reconnected “{}”. Refreshing now.",
                     connection.alias
                 ));
                 return;
@@ -384,11 +384,7 @@ mod tests {
             }),
         });
         assert!(f.list.reconnecting().is_none());
-        assert!(f
-            .list
-            .message()
-            .unwrap()
-            .starts_with("Reconnected \"work\""));
+        assert!(f.list.message().unwrap().starts_with("Reconnected “work”"));
 
         // Switch to another connection: provider must match.
         f.input(ManageInput::StartReconnect(id("k")));

@@ -81,7 +81,7 @@ impl ConnectError {
             Self::Inactive(status) => {
                 format!("This token is {status}. Create a new one and paste it here.")
             }
-            Self::Store(message) => format!("Could not save the connection: {message}"),
+            Self::Store(message) => format!("BuildRail could not save the connection: {message}"),
             Self::Alias(message) => message.clone(),
         }
     }
@@ -90,40 +90,45 @@ impl ConnectError {
 /// What to tell the user about creating a token.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TokenGuidance {
-    /// What kind of token.
+    /// What kind of token ("GitHub fine-grained personal access token").
     pub title: &'static str,
     /// Where to create it.
     pub url: &'static str,
-    /// Step-by-step instructions.
+    /// Step-by-step instructions, each a sentence.
     pub steps: &'static [&'static str],
     /// The exact read permissions, in one sentence.
     pub permissions: &'static str,
+    /// An example of what a token looks like, for the empty field.
+    pub placeholder: &'static str,
 }
 
-/// Token instructions for `provider`. Read-only permissions only.
+/// Token instructions for `provider`. Read-only permissions only. Menu
+/// paths are joined with `›`, as the design system joins steps.
 pub fn guidance(provider: ProviderKind) -> TokenGuidance {
     match provider {
         ProviderKind::GitHub => TokenGuidance {
             title: "GitHub fine-grained personal access token",
             url: "https://github.com/settings/personal-access-tokens/new",
             steps: &[
-                "On GitHub open Settings > Developer settings > Fine-grained tokens > Generate new token.",
+                "On GitHub, open Settings › Developer settings › Fine-grained tokens › Generate new token.",
                 "Pick the repositories you want to watch.",
-                "Under Repository permissions set Actions to Read-only and Metadata to Read-only. Nothing else is needed.",
-                "Paste the token below. It is kept in your operating system's credential store, never in BuildRail's files or exports.",
+                "Under Repository permissions, set Actions and Metadata to Read-only. Nothing else is needed.",
+                "Copy the token and paste it below.",
             ],
-            permissions: "It needs repository permissions Actions: Read and Metadata: Read.",
+            permissions: "It needs only the repository permissions Actions: Read and Metadata: Read.",
+            placeholder: "github_pat_11ABCDEFG0…",
         },
         ProviderKind::Cloudflare => TokenGuidance {
             title: "Cloudflare user API token",
             url: "https://dash.cloudflare.com/profile/api-tokens",
             steps: &[
-                "In the Cloudflare dashboard open My Profile > API Tokens > Create Token > Custom token. (Workers Builds only accepts user tokens, not account-owned tokens.)",
-                "Add the permissions Account > Workers CI > Read and Account > Workers Scripts > Read.",
+                "In the Cloudflare dashboard, open My Profile › API Tokens › Create Token › Custom token. Workers Builds accepts only user tokens, not account-owned ones.",
+                "Add the permissions Account › Workers CI › Read and Account › Workers Scripts › Read.",
                 "Include the accounts whose Workers you want to watch.",
-                "Paste the token below. It is kept in your operating system's credential store, never in BuildRail's files or exports.",
+                "Copy the token and paste it below.",
             ],
-            permissions: "It must be a user API token with Workers CI: Read and Workers Scripts: Read.",
+            permissions: "It must be a user API token with only Workers CI: Read and Workers Scripts: Read.",
+            placeholder: "Xq7f2Lr9…",
         },
     }
 }
@@ -399,7 +404,7 @@ mod tests {
         let cf = ProviderKind::Cloudflare;
         assert!(ConnectError::Verify(LoadError::Access("x".into()))
             .message(cf)
-            .contains("user API token with Workers CI: Read and Workers Scripts: Read"));
+            .contains("user API token with only Workers CI: Read and Workers Scripts: Read"));
         assert_eq!(
             ConnectError::Verify(LoadError::Other("offline".into())).message(cf),
             "offline"

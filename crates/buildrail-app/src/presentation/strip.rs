@@ -112,8 +112,11 @@ pub struct StripEntry {
     pub stale: bool,
     /// `true` when the user must reconnect the watch's connection.
     pub needs_reconnect: bool,
-    /// Lines for the hover / keyboard-focus detail popup.
+    /// Facts for the hover / keyboard-focus detail popup, one per line.
     pub details: Vec<String>,
+    /// The sentence under the facts that says what activating the entry
+    /// does ("Click or press Enter to open the latest run."), if anything.
+    pub hint: Option<String>,
     /// Full sentence for screen readers, e.g.
     /// "Keevoro, GitHub, Failed, branch main, commit a7c412e, 2 minutes ago".
     pub accessible_name: String,
@@ -293,11 +296,13 @@ fn entry(watch: &Watch, snapshot: &WatchSnapshot, now: DateTime<Utc>) -> StripEn
             details.push(note.clone());
         }
     }
-    if needs_reconnect {
-        details.push("Open Settings to reconnect".to_owned());
+    let hint = if needs_reconnect {
+        Some("Click or press Enter to reconnect in Settings.".to_owned())
     } else if record.is_some() {
-        details.push("Press Enter or click to open the run".to_owned());
-    }
+        Some("Click or press Enter to open the latest run.".to_owned())
+    } else {
+        None
+    };
 
     let mut spoken = vec![
         watch.label.clone(),
@@ -333,6 +338,7 @@ fn entry(watch: &Watch, snapshot: &WatchSnapshot, now: DateTime<Utc>) -> StripEn
         stale,
         needs_reconnect,
         details,
+        hint,
         accessible_name: spoken.join(", "),
         url: record.map(|r| r.url.clone()),
     }
@@ -445,8 +451,11 @@ mod tests {
                 "Commit a7c412e",
                 "Failed 2 min ago",
                 "Failing job: test (ubuntu)",
-                "Press Enter or click to open the run",
             ]
+        );
+        assert_eq!(
+            e.hint.as_deref(),
+            Some("Click or press Enter to open the latest run.")
         );
         assert_eq!(
             e.url.as_deref(),
@@ -500,6 +509,7 @@ mod tests {
         assert_eq!(empty.accessible_name, "Site, Cloudflare, No runs yet");
         assert_eq!(empty.url, None);
         assert_eq!(empty.details, vec!["Cloudflare · Worker w"]);
+        assert_eq!(empty.hint, None);
 
         let denied = one(
             cf("w", "Site"),
@@ -516,9 +526,10 @@ mod tests {
         assert!(denied.needs_reconnect);
         assert_eq!(denied.note.as_deref(), Some("Reconnect needed"));
         assert_eq!(denied.accessible_name, "Site, Cloudflare, Reconnect needed");
-        assert!(denied
-            .details
-            .contains(&"Open Settings to reconnect".to_owned()));
+        assert_eq!(
+            denied.hint.as_deref(),
+            Some("Click or press Enter to reconnect in Settings.")
+        );
     }
 
     #[test]

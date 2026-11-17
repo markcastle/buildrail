@@ -15,7 +15,7 @@ use eframe::egui::{self, Pos2, Vec2, ViewportBuilder, ViewportCommand};
 use raw_window_handle::RawWindowHandle;
 
 use super::app::BuildRailUi;
-use super::settings::DeviceInfo;
+use super::settings::{DeviceInfo, MonitorInfo};
 use crate::shell::{DockController, ShellCommand, ShellMode, FLOAT_SIZE};
 
 /// How often fullscreen and dock state are polled.
@@ -94,15 +94,17 @@ impl StripWindow {
         let Some(shell) = &self.shell else { return };
         self.ui.set_movable(shell.mode().is_movable());
         let placement_note = match shell.mode() {
-            ShellMode::Docked { guarantee, .. } => Some(format!(
-                "Docked above the taskbar ({}).",
+            ShellMode::Docked { guarantee, .. } => Some(
                 match guarantee {
-                    buildrail_platform::dock::ReservationGuarantee::Enforced =>
-                        "maximised windows stop above the strip",
-                    buildrail_platform::dock::ReservationGuarantee::BestEffort =>
-                        "the window manager decides whether maximised windows stop above it",
+                    buildrail_platform::dock::ReservationGuarantee::Enforced => {
+                        "Docked above the taskbar. Maximised windows stop above the strip."
+                    }
+                    buildrail_platform::dock::ReservationGuarantee::BestEffort => {
+                        "Docked along the bottom edge. Your window manager decides whether maximised windows stop above it."
+                    }
                 }
-            )),
+                .to_owned(),
+            ),
             ShellMode::Floating { reason, .. } => Some(reason.explanation()),
             ShellMode::NotStarted => None,
         };
@@ -110,16 +112,13 @@ impl StripWindow {
             shell
                 .monitors()
                 .into_iter()
-                .map(|m| {
-                    let label = format!(
-                        "{} ({}x{}, {:.0} %){}",
-                        m.id,
-                        m.bounds.width,
-                        m.bounds.height,
-                        m.scale_factor * 100.0,
-                        if m.is_primary { ", primary" } else { "" }
-                    );
-                    (m.id.to_string(), label)
+                .enumerate()
+                .map(|(index, m)| MonitorInfo {
+                    id: m.id.to_string(),
+                    name: format!("Display {}", index + 1),
+                    width: m.bounds.width,
+                    height: m.bounds.height,
+                    primary: m.is_primary,
                 })
                 .collect()
         } else {
@@ -200,6 +199,10 @@ impl eframe::App for StripWindow {
         let output = self.ui.ui(ui);
         if output.start_drag {
             ui.ctx().send_viewport_cmd(ViewportCommand::StartDrag);
+        }
+        if output.quit {
+            ui.ctx()
+                .send_viewport_cmd_to(egui::ViewportId::ROOT, ViewportCommand::Close);
         }
         if output.placement_changed {
             if let Some(shell) = &mut self.shell {

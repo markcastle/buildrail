@@ -68,10 +68,18 @@ impl FloatReason {
     /// A sentence for Settings.
     pub fn explanation(&self) -> String {
         match self {
-            Self::Chosen => "Floating window (you can drag it by the \"Builds\" caption).".into(),
-            Self::Unsupported(reason) => reason.to_string(),
+            Self::Chosen => {
+                "Floating, so you can drag the strip anywhere by its “Builds” caption.".into()
+            }
+            Self::Unsupported(reason) => {
+                // The platform words it as a clause; Settings shows sentences.
+                let text = reason.to_string();
+                let mut chars = text.chars();
+                let first = chars.next().map(|c| c.to_uppercase().to_string());
+                format!("{}{}.", first.unwrap_or_default(), chars.as_str())
+            }
             Self::Failed(message) => {
-                format!("Docking failed ({message}); using a floating window.")
+                format!("The strip could not dock ({message}), so it floats instead. You can drag it by its caption.")
             }
         }
     }
@@ -753,7 +761,7 @@ mod tests {
             panic!()
         };
         assert!(matches!(reason, FloatReason::Failed(m) if m.contains("no display")));
-        assert!(reason.explanation().starts_with("Docking failed"));
+        assert!(reason.explanation().starts_with("The strip could not dock"));
         f.probe.set(FullscreenState::Fullscreen);
         assert_eq!(f.shell.tick(f.t0), vec![ShellCommand::Hide]);
     }

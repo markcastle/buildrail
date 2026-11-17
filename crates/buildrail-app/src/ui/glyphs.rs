@@ -1,139 +1,216 @@
-//! Simple vector glyphs: status icons and the plain-letter provider marks.
+//! Vector glyphs in the lucide manner Task Rail uses: drawn on a 24-unit
+//! grid with 2 to 2.2 unit strokes, round caps and round joins, and
+//! antialiased by egui's tessellator.
 //!
-//! Each [`IconKind`] has its own *shape* (tick, cross, ring, bar, chevrons,
-//! triangle, …) so status is readable without colour. Provider marks are
-//! the letters "GH" / "CF" in a rounded box – deliberately not the
-//! providers' logo artwork.
+//! * Status glyphs ([`paint_icon`]): each [`IconKind`] has its own *shape*
+//!   (tick, ring with tick, filled disc with a cross, clock, …) so state
+//!   reads without colour.
+//! * Action glyphs: [`paint_gear`] (settings), [`paint_plus`] (add),
+//!   [`paint_chevron_right`], [`paint_arrow_left`] (back), [`paint_tick`].
+//! * Provider marks ([`paint_provider_mark`]) are the plain letters "GH" /
+//!   "CF" in a small well: deliberately not the providers' logo artwork.
+//!
+//! A glyph takes the colour it is given, like `currentColor`: the caller
+//! picks the token.
 
-use std::f32::consts::TAU;
+use std::f32::consts::{PI, TAU};
 
-use eframe::egui::{Align2, Color32, CornerRadius, FontId, Painter, Pos2, Rect, Stroke, Vec2};
+use eframe::egui::{Align2, Color32, CornerRadius, Painter, Pos2, Rect, Shape, Stroke, Vec2};
 
+use super::theme::type_style;
 use crate::presentation::IconKind;
 
-/// Draws `icon` centred on `center`, `size` points across. `time` (seconds)
-/// rotates the spinner.
+/// Maps the 24-unit design grid onto the screen.
+#[derive(Clone, Copy)]
+struct Grid {
+    center: Pos2,
+    unit: f32,
+    width: f32,
+    color: Color32,
+}
+
+impl Grid {
+    fn new(center: Pos2, size: f32, color: Color32) -> Self {
+        let unit = size / 24.0;
+        Self {
+            center,
+            unit,
+            // 2.2 units, never thinner than 1.25 pt so small glyphs stay crisp.
+            width: (2.2 * unit).max(1.25),
+            color,
+        }
+    }
+
+    fn p(&self, x: f32, y: f32) -> Pos2 {
+        self.center + Vec2::new((x - 12.0) * self.unit, (y - 12.0) * self.unit)
+    }
+
+    /// An open polyline with round caps and joins.
+    fn line(&self, painter: &Painter, points: &[(f32, f32)]) {
+        let points: Vec<Pos2> = points.iter().map(|&(x, y)| self.p(x, y)).collect();
+        self.path(painter, points, false);
+    }
+
+    fn path(&self, painter: &Painter, points: Vec<Pos2>, closed: bool) {
+        let stroke = Stroke::new(self.width, self.color);
+        for point in &points {
+            painter.circle_filled(*point, self.width / 2.0, self.color);
+        }
+        if closed {
+            painter.add(Shape::closed_line(points, stroke));
+        } else {
+            painter.add(Shape::line(points, stroke));
+        }
+    }
+
+    /// A circle outline of radius `r` units around (`x`, `y`).
+    fn ring(&self, painter: &Painter, x: f32, y: f32, r: f32) {
+        painter.circle_stroke(
+            self.p(x, y),
+            r * self.unit,
+            Stroke::new(self.width, self.color),
+        );
+    }
+
+    /// An arc from `start` sweeping `sweep` radians (clockwise on screen).
+    fn arc(&self, painter: &Painter, x: f32, y: f32, r: f32, start: f32, sweep: f32) {
+        let steps = ((sweep.abs() / TAU) * 48.0).ceil().max(4.0) as usize;
+        let points = (0..=steps)
+            .map(|i| {
+                let a = start + sweep * i as f32 / steps as f32;
+                self.p(x, y) + Vec2::angled(a) * r * self.unit
+            })
+            .collect();
+        self.path(painter, points, false);
+    }
+
+    fn dot(&self, painter: &Painter, x: f32, y: f32, r: f32) {
+        painter.circle_filled(self.p(x, y), (r * self.unit).max(0.9), self.color);
+    }
+}
+
+/// Draws `icon` centred on `center`, `size` points across, in `color`.
+/// `ground` is the colour behind it (the failed glyph knocks its cross out
+/// of a filled disc). `time` (seconds) turns the spinner.
 pub fn paint_icon(
     painter: &Painter,
     center: Pos2,
     size: f32,
     icon: IconKind,
     color: Color32,
+    ground: Color32,
     time: f64,
 ) {
-    let r = size / 2.0;
-    let stroke = Stroke::new((size / 7.0).max(1.4), color);
-    let p = |x: f32, y: f32| center + Vec2::new(x * r, y * r);
+    let g = Grid::new(center, size, color);
     match icon {
-        IconKind::Check => {
-            painter.line(vec![p(-0.8, 0.0), p(-0.25, 0.6), p(0.85, -0.65)], stroke);
-        }
+        IconKind::Check => g.line(painter, &[(20.0, 6.0), (9.0, 17.0), (4.0, 12.0)]),
         IconKind::CheckCircle => {
-            painter.circle_stroke(center, r, Stroke::new(stroke.width * 0.8, color));
-            painter.line(vec![p(-0.5, 0.0), p(-0.15, 0.4), p(0.5, -0.4)], stroke);
+            g.ring(painter, 12.0, 12.0, 10.0);
+            g.line(painter, &[(8.5, 12.0), (11.0, 14.5), (15.5, 10.0)]);
         }
         IconKind::Cross => {
-            painter.line_segment([p(-0.7, -0.7), p(0.7, 0.7)], stroke);
-            painter.line_segment([p(-0.7, 0.7), p(0.7, -0.7)], stroke);
+            painter.circle_filled(center, 11.0 * g.unit, color);
+            let knock = Grid { color: ground, ..g };
+            knock.line(painter, &[(15.0, 9.0), (9.0, 15.0)]);
+            knock.line(painter, &[(9.0, 9.0), (15.0, 15.0)]);
         }
         IconKind::Spinner => {
-            // Faint full ring plus a rotating three-quarter arc.
-            painter.circle_stroke(
-                center,
-                r * 0.85,
-                Stroke::new(stroke.width, color.gamma_multiply(0.35)),
-            );
-            let start = (time as f32 * TAU * 0.8) % TAU;
-            let points: Vec<Pos2> = (0..=18)
-                .map(|i| {
-                    let a = start + (i as f32 / 18.0) * TAU * 0.75;
-                    center + Vec2::angled(a) * (r * 0.85)
-                })
-                .collect();
-            painter.line(points, stroke);
+            let faint = Grid {
+                color: color.gamma_multiply(0.3),
+                ..g
+            };
+            faint.ring(painter, 12.0, 12.0, 9.5);
+            let start = (time as f32 * TAU * 0.8) % TAU - PI / 2.0;
+            g.arc(painter, 12.0, 12.0, 9.5, start, TAU * 0.3);
         }
         IconKind::Queued => {
-            painter.circle_stroke(center, r * 0.85, stroke);
-            painter.circle_filled(center, r * 0.25, color);
+            g.ring(painter, 12.0, 12.0, 10.0);
+            g.line(painter, &[(12.0, 7.0), (12.0, 12.0), (15.5, 14.0)]);
         }
         IconKind::Dash => {
-            painter.line_segment(
-                [p(-0.75, 0.0), p(0.75, 0.0)],
-                Stroke::new(stroke.width * 1.3, color),
-            );
+            g.ring(painter, 12.0, 12.0, 10.0);
+            g.line(painter, &[(8.0, 12.0), (16.0, 12.0)]);
         }
         IconKind::Skip => {
-            painter.line(vec![p(-0.8, -0.6), p(-0.2, 0.0), p(-0.8, 0.6)], stroke);
-            painter.line(vec![p(0.1, -0.6), p(0.7, 0.0), p(0.1, 0.6)], stroke);
+            g.line(painter, &[(6.0, 17.0), (11.0, 12.0), (6.0, 7.0)]);
+            g.line(painter, &[(13.0, 17.0), (18.0, 12.0), (13.0, 7.0)]);
         }
         IconKind::Question => {
-            painter.text(
-                center,
-                Align2::CENTER_CENTER,
-                "?",
-                FontId::proportional(size * 1.15),
-                color,
-            );
+            g.ring(painter, 12.0, 12.0, 10.0);
+            g.arc(painter, 12.0, 9.6, 2.9, PI * 1.05, PI * 1.25);
+            g.line(painter, &[(13.4, 12.2), (12.0, 13.4)]);
+            g.dot(painter, 12.0, 17.0, 1.3);
         }
         IconKind::Empty => {
-            painter.circle_stroke(center, r * 0.8, Stroke::new(stroke.width * 0.8, color));
+            // A dashed ring: eight arcs with gaps between them.
+            for i in 0..8 {
+                let start = i as f32 / 8.0 * TAU + 0.12;
+                g.arc(painter, 12.0, 12.0, 10.0, start, TAU / 8.0 - 0.5);
+            }
         }
         IconKind::Pending => {
-            for x in [-0.65, 0.0, 0.65] {
-                painter.circle_filled(p(x, 0.0), r * 0.17, color);
+            for x in [5.0, 12.0, 19.0] {
+                g.dot(painter, x, 12.0, 1.6);
             }
         }
         IconKind::Warning => {
-            painter.line(
-                vec![p(0.0, -0.9), p(0.9, 0.75), p(-0.9, 0.75), p(0.0, -0.9)],
-                Stroke::new(stroke.width * 0.8, color),
-            );
-            painter.line_segment([p(0.0, -0.3), p(0.0, 0.2)], stroke);
-            painter.circle_filled(p(0.0, 0.48), r * 0.1, color);
+            let points = [(12.0, 3.6), (21.4, 19.6), (2.6, 19.6)]
+                .iter()
+                .map(|&(x, y)| g.p(x, y))
+                .collect();
+            g.path(painter, points, true);
+            g.line(painter, &[(12.0, 9.5), (12.0, 13.0)]);
+            g.dot(painter, 12.0, 16.4, 1.25);
         }
     }
 }
 
-/// Draws a provider mark ("GH" / "CF") in a rounded outline inside `rect`.
-pub fn paint_provider_mark(painter: &Painter, rect: Rect, mark: &str, color: Color32) {
-    painter.rect_stroke(
-        rect,
-        CornerRadius::same(3),
-        Stroke::new(1.0, color.gamma_multiply(0.7)),
-        eframe::egui::StrokeKind::Inside,
-    );
-    painter.text(
-        rect.center(),
-        Align2::CENTER_CENTER,
-        mark,
-        FontId::monospace(rect.height() * 0.62),
-        color,
-    );
-}
-
-/// Draws a gear (settings) glyph.
+/// Draws the settings glyph: a cog with eight teeth around a ring.
 pub fn paint_gear(painter: &Painter, center: Pos2, size: f32, color: Color32) {
-    let r = size / 2.0;
-    let stroke = Stroke::new((size / 8.0).max(1.3), color);
-    painter.circle_stroke(center, r * 0.5, stroke);
-    for i in 0..8 {
-        let a = i as f32 / 8.0 * TAU;
-        painter.line_segment(
-            [
-                center + Vec2::angled(a) * r * 0.62,
-                center + Vec2::angled(a) * r * 0.95,
-            ],
-            stroke,
-        );
+    let g = Grid::new(center, size, color);
+    let (inner, outer) = (7.6, 10.4);
+    let mut points = Vec::with_capacity(32);
+    for tooth in 0..8 {
+        let a = tooth as f32 / 8.0 * TAU;
+        for (r, da) in [(inner, -0.30), (outer, -0.17), (outer, 0.17), (inner, 0.30)] {
+            points.push(g.p(12.0, 12.0) + Vec2::angled(a + da) * r * g.unit);
+        }
     }
+    g.path(painter, points, true);
+    g.ring(painter, 12.0, 12.0, 3.0);
 }
 
-/// Draws a plus (add) glyph.
+/// Draws the add glyph.
 pub fn paint_plus(painter: &Painter, center: Pos2, size: f32, color: Color32) {
-    let r = size / 2.0;
-    let stroke = Stroke::new((size / 7.0).max(1.4), color);
-    painter.line_segment([center - Vec2::X * r, center + Vec2::X * r], stroke);
-    painter.line_segment([center - Vec2::Y * r, center + Vec2::Y * r], stroke);
+    let g = Grid::new(center, size, color);
+    g.line(painter, &[(5.0, 12.0), (19.0, 12.0)]);
+    g.line(painter, &[(12.0, 5.0), (12.0, 19.0)]);
+}
+
+/// Draws a chevron pointing right (a row that opens something).
+pub fn paint_chevron_right(painter: &Painter, center: Pos2, size: f32, color: Color32) {
+    Grid::new(center, size, color).line(painter, &[(9.0, 18.0), (15.0, 12.0), (9.0, 6.0)]);
+}
+
+/// Draws an arrow pointing left (the way back).
+pub fn paint_arrow_left(painter: &Painter, center: Pos2, size: f32, color: Color32) {
+    let g = Grid::new(center, size, color);
+    g.line(painter, &[(19.0, 12.0), (5.0, 12.0)]);
+    g.line(painter, &[(12.0, 19.0), (5.0, 12.0), (12.0, 5.0)]);
+}
+
+/// Draws a plain tick (a picked option, a saved change).
+pub fn paint_tick(painter: &Painter, center: Pos2, size: f32, color: Color32) {
+    Grid::new(center, size, color).line(painter, &[(20.0, 6.0), (9.0, 17.0), (4.0, 12.0)]);
+}
+
+/// Draws a provider mark ("GH" / "CF"): two letters in `ink` in a small
+/// rounded well of `fill`.
+pub fn paint_provider_mark(painter: &Painter, rect: Rect, mark: &str, fill: Color32, ink: Color32) {
+    painter.rect_filled(rect, CornerRadius::same(4), fill);
+    let font = type_style::CHIP.font();
+    let font = eframe::egui::FontId::new(rect.height() * 0.62, font.family);
+    painter.text(rect.center(), Align2::CENTER_CENTER, mark, font, ink);
 }
 
 #[cfg(test)]
@@ -164,25 +241,30 @@ mod tests {
                 paint_icon(
                     painter,
                     Pos2::new(10.0 + 20.0 * i as f32, 12.0),
-                    11.0,
+                    12.0,
                     *icon,
                     Color32::RED,
+                    Color32::BLACK,
                     1.5,
                 );
             }
             paint_provider_mark(
                 painter,
-                Rect::from_min_size(Pos2::ZERO, Vec2::new(19.0, 13.0)),
+                Rect::from_min_size(Pos2::ZERO, Vec2::new(18.0, 14.0)),
                 "GH",
+                Color32::DARK_GRAY,
                 Color32::GRAY,
             );
-            paint_gear(painter, Pos2::new(300.0, 12.0), 13.0, Color32::WHITE);
-            paint_plus(painter, Pos2::new(320.0, 12.0), 10.0, Color32::WHITE);
+            paint_gear(painter, Pos2::new(300.0, 12.0), 14.0, Color32::WHITE);
+            paint_plus(painter, Pos2::new(320.0, 12.0), 14.0, Color32::WHITE);
+            paint_chevron_right(painter, Pos2::new(340.0, 12.0), 14.0, Color32::WHITE);
+            paint_arrow_left(painter, Pos2::new(360.0, 12.0), 14.0, Color32::WHITE);
+            paint_tick(painter, Pos2::new(380.0, 12.0), 14.0, Color32::WHITE);
         });
         output.textures_delta.clear();
-        // At least one shape per icon plus the marks.
+        // Several shapes per glyph (strokes plus their round caps).
         assert!(
-            output.shapes.len() > icons.len() + 3,
+            output.shapes.len() > 3 * icons.len(),
             "{}",
             output.shapes.len()
         );
