@@ -74,9 +74,6 @@ pub enum CheckError {
     /// The newer release was signed with a key this build does not carry.
     #[error("the latest release was signed with a different key; download it by hand")]
     DifferentKey,
-    /// The newer release has nothing for this platform.
-    #[error("the latest release has no build for {0}")]
-    NoBuildForTarget(&'static str),
     /// The newer release's download address is not acceptable.
     #[error("{0}")]
     UnsafeUrl(UrlError),
@@ -91,7 +88,10 @@ pub enum CheckError {
 pub enum UpdateStatus {
     /// This build has no embedded key or no release asset for its platform.
     NotConfigured,
-    /// Nothing newer.
+    /// Nothing newer to install. This includes a newer release that has no
+    /// build for this platform: macOS and Linux are built only for some
+    /// releases, so that is normal, not a failure, and the next check simply
+    /// looks again (the reason is logged at debug level).
     UpToDate {
         /// The running version.
         current: Version,
@@ -122,6 +122,21 @@ pub enum SetupError {
     /// The running executable could not be located.
     #[error("could not locate the running program: {0}")]
     Exe(String),
+}
+
+/// What [`Updater::find_update`] found in the feed.
+#[derive(Debug)]
+enum Found {
+    /// A newer release this build can install.
+    Update(Update),
+    /// The feed's release is not newer than this build.
+    NothingNewer,
+    /// The feed's release is newer but has no build for this platform
+    /// (macOS and Linux are built only for some releases).
+    NoBuildForTarget {
+        /// The release's version.
+        version: Version,
+    },
 }
 
 /// Checks for, verifies and installs updates.
@@ -217,10 +232,19 @@ impl Updater {
             return UpdateStatus::NotConfigured;
         };
         match self.find_update(&key, target).await {
-            Ok(Some(update)) => UpdateStatus::Available(update),
-            Ok(None) => UpdateStatus::UpToDate {
+            Ok(Found::Update(update)) => UpdateStatus::Available(update),
+            Ok(Found::NothingNewer) => UpdateStatus::UpToDate {
                 current: self.current.clone(),
             },
+            Ok(Found::NoBuildForTarget { version }) => {
+                tracing::debug!(
+                    "release {version} has no build for {target}; staying on {}",
+                    self.current
+                );
+                UpdateStatus::UpToDate {
+                    current: self.current.clone(),
+                }
+            }
             Err(error) => UpdateStatus::Failed(error),
         }
     }
@@ -229,7 +253,7 @@ impl Updater {
         &self,
         key: &PublicKey,
         target: &'static str,
-    ) -> Result<Option<Update>, CheckError> {
+    ) -> Result<Found, CheckError> {
         let bytes = self
             .feed
             .fetch_manifest()
@@ -241,20 +265,21 @@ impl Updater {
         let manifest = Manifest::parse(&bytes).map_err(CheckError::Manifest)?;
         let version = Version::parse(&manifest.version).map_err(|_| CheckError::BadVersion)?;
         if !is_newer(&self.current, &version) {
-            return Ok(None);
+            return Ok(Found::NothingNewer);
         }
+        // Before the key: a release with nothing for this platform is not
+        // for this copy at all, whoever signed it.
+        let Some(entry) = manifest.targets.get(target) else {
+            return Ok(Found::NoBuildForTarget { version });
+        };
         if manifest.key_id != key.key_id() {
             return Err(CheckError::DifferentKey);
         }
-        let entry = manifest
-            .targets
-            .get(target)
-            .ok_or(CheckError::NoBuildForTarget(target))?;
         validate_asset_url(&entry.url).map_err(CheckError::UnsafeUrl)?;
         if entry.size == 0 || entry.size > self.limits.payload_bytes {
             return Err(CheckError::PayloadTooLarge);
         }
-        Ok(Some(Update {
+        Ok(Found::Update(Update {
             version,
             notes_url: safe_notes_url(&manifest.notes_url),
             target,
@@ -824,10 +849,6 @@ pub(crate) mod tests {
                 StaticFeed::new(m.to_json().replace("0.3.0\"", "v0.3\"")),
                 CheckError::BadVersion,
             ),
-            (
-                StaticFeed::new(m.to_json().replace(TARGET, "linux-riscv64")),
-                CheckError::NoBuildForTarget(TARGET),
-            ),
         ];
         for (feed, expected) in cases {
             let rig = rig_with("0.2.0", feed, Some(&key_a()));
@@ -851,6 +872,36 @@ pub(crate) mod tests {
             .to_string()
             .contains("needs a newer BuildRail"));
         let _ = gz;
+    }
+
+    #[tokio::test]
+    async fn a_newer_release_without_this_platform_is_up_to_date_not_a_failure() {
+        // Most releases are Windows-only; a Linux copy must stay calm.
+        let (m, _gz) = good_release();
+        let windows_only = m.to_json().replace(TARGET, "windows-x86_64");
+        let rig = rig_with("0.2.0", StaticFeed::new(windows_only.clone()), Some(&key_a()));
+        let status = rig.updater.check().await;
+        assert_eq!(
+            status,
+            UpdateStatus::UpToDate {
+                current: Version::new(0, 2, 0)
+            }
+        );
+        assert_eq!(status.to_string(), "Up to date.");
+        let found = rig.updater.find_update(&key_a().public_key(), TARGET).await;
+        assert!(
+            matches!(found, Ok(Found::NoBuildForTarget { ref version }) if *version == Version::new(0, 3, 0)),
+            "{found:?}"
+        );
+        // Checked before the key: a release signed with another key that
+        // has nothing for this platform is not this copy's concern either.
+        let other_key = windows_only.replace(&key_a().public_key().key_id(), "0000000000000000");
+        let rig = rig_with("0.2.0", StaticFeed::new(other_key), Some(&key_a()));
+        assert!(matches!(rig.updater.check().await, UpdateStatus::UpToDate { .. }));
+        // And the schedule treats it like any other quiet answer.
+        let mut schedule = crate::client::UpdateSchedule::new();
+        schedule.record(std::time::Duration::ZERO, &status);
+        assert!(schedule.next_check_at().is_some());
     }
 
     #[tokio::test]
@@ -913,7 +964,6 @@ pub(crate) mod tests {
             CheckError::ManifestTooLarge,
             CheckError::BadVersion,
             CheckError::DifferentKey,
-            CheckError::NoBuildForTarget(TARGET),
             CheckError::PayloadTooLarge,
             CheckError::Fetch(FetchError::UnexpectedHost("https://x".into())),
             CheckError::Fetch(FetchError::NotAllowed),

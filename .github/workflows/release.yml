@@ -8,8 +8,17 @@ name: Release
 # see exactly what would happen without pushing, building or publishing
 # anything; a rehearsal can run from any branch.
 #
-# Three jobs:
+# Platforms: every release is built for Windows. macOS (Apple silicon and
+# Intel) and Linux are built only when "Also build macOS and Linux" is
+# ticked, which is meant for major releases while BuildRail is moving fast.
+# Installed macOS and Linux copies treat a release without their build as
+# "Up to date", and the one-line installers fall back to the newest release
+# that has one.
 #
+# The jobs:
+#
+#   macos-tests   only with all platforms: the test suite on macOS, which
+#             per-commit CI does not run, BEFORE anything is tagged.
 #   prepare   decides and checks the version, checks CI passed on this
 #             commit, checks the update signing key, cuts the release with
 #             `cargo run -p xtask -- release` (the same command a person can
@@ -43,6 +52,10 @@ on:
         description: 'Rehearse: do everything except push, build and publish'
         type: boolean
         default: false
+      all_platforms:
+        description: 'Also build macOS and Linux (for major releases)'
+        type: boolean
+        default: false
       rotate_key:
         description: 'I replaced the update signing key on purpose (copies already installed will have to be reinstalled by hand)'
         type: boolean
@@ -60,6 +73,10 @@ on:
         description: 'The commit to release, when it is newer than the one the calling workflow started on'
         type: string
         default: ''
+      all_platforms:
+        description: 'Also build macOS and Linux'
+        type: boolean
+        default: false
 
 permissions:
   contents: write # push the release commit and tag, create and publish the release
@@ -72,16 +89,38 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  # The platforms every release carries, as named in latest.json and in the
-  # file names. The build matrix below must list the same four.
-  TARGETS: windows-x86_64 macos-aarch64 macos-x86_64 linux-x86_64
 
 jobs:
+  # Per-commit CI tests on Windows and Linux only. A release that also
+  # builds for macOS runs the test suite there first, and prepare waits for
+  # it, so a macOS failure stops the release before anything is pushed or
+  # tagged: nothing is left half done, not even a draft. Requiring a
+  # full-platform CI run on the commit instead would make every major
+  # release a two-step chore for the same assurance. Linux needs no extra
+  # run: per-commit CI already tests it.
+  macos-tests:
+    name: Test on macOS
+    if: ${{ inputs.all_platforms }}
+    runs-on: macos-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.commit || github.sha }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace --locked
+
   prepare:
     name: Prepare ${{ inputs.version || 'the next version' }}${{ inputs.dry_run && ' (rehearsal)' || '' }}
+    needs: macos-tests
+    # Runs when the macOS tests passed or were not needed (skipped).
+    if: ${{ !failure() && !cancelled() }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     outputs:
+      targets: ${{ steps.platforms.outputs.targets }}
+      matrix: ${{ steps.platforms.outputs.matrix }}
       version: ${{ steps.cut.outputs.version }}
       signed: ${{ steps.signing.outputs.signed }}
       public_key: ${{ steps.signing.outputs.public_key }}
@@ -107,6 +146,43 @@ jobs:
             echo "::error::\"$INPUT_VERSION\" is not a version. Use major.minor.patch, such as 0.3.0, or leave it blank."
             exit 1
           fi
+
+      # Windows always; macOS and Linux only when asked. Everything after
+      # this (the build matrix, the payloads signed into latest.json, the
+      # checksums and the files publish insists on) follows this one list.
+      - name: Choose the platforms
+        id: platforms
+        env:
+          ALL_PLATFORMS: ${{ inputs.all_platforms }}
+        run: |
+          # Intel Macs are built on the Apple silicon runner, which builds
+          # for both. Linux is built on the oldest supported Ubuntu, so the
+          # binary needs only glibc 2.35 and runs on more distributions.
+          all='[
+            {"target": "windows-x86_64", "os": "windows-latest", "triple": "x86_64-pc-windows-msvc", "label": "Windows"},
+            {"target": "macos-aarch64", "os": "macos-latest", "triple": "aarch64-apple-darwin", "label": "macOS (Apple silicon)"},
+            {"target": "macos-x86_64", "os": "macos-latest", "triple": "x86_64-apple-darwin", "label": "macOS (Intel)"},
+            {"target": "linux-x86_64", "os": "ubuntu-22.04", "triple": "x86_64-unknown-linux-gnu", "label": "Linux"}
+          ]'
+          if [ "$ALL_PLATFORMS" = "true" ]; then
+            chosen=$(jq -c '.' <<< "$all")
+          else
+            chosen=$(jq -c 'map(select(.target == "windows-x86_64"))' <<< "$all")
+          fi
+          {
+            echo "targets=$(jq -r 'map(.target) | join(" ")' <<< "$chosen")"
+            echo "matrix=$(jq -c '{include: .}' <<< "$chosen")"
+          } >> "$GITHUB_OUTPUT"
+          labels=$(jq -r 'map(.label) | join(", ")' <<< "$chosen")
+          echo "Platforms: $labels"
+          {
+            echo "**Platforms:** $labels."
+            if [ "$ALL_PLATFORMS" != "true" ]; then
+              echo
+              echo "macOS and Linux are built only when \"Also build macOS and Linux\" is ticked, for major releases. Copies already installed there stay on their version and say \"Up to date\"."
+            fi
+            echo
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -276,6 +352,7 @@ jobs:
         env:
           VERSION: ${{ steps.cut.outputs.version }}
           REPO: ${{ github.repository }}
+          ALL_PLATFORMS: ${{ inputs.all_platforms }}
         run: |
           notes="$RUNNER_TEMP/release-notes.md"
           cargo run --quiet --locked -p xtask -- changelog section "$VERSION" > "$notes"
@@ -285,6 +362,9 @@ jobs:
 
           **Install or update in one line.** Windows, in PowerShell: \`irm https://raw.githubusercontent.com/$REPO/main/scripts/install.ps1 | iex\`. macOS and Linux: \`curl -fsSL https://raw.githubusercontent.com/$REPO/main/scripts/install.sh | sh\`. Or download below: \`SHA256SUMS.txt\` has every file's checksum. Every version's notes are in [CHANGELOG.md](https://github.com/$REPO/blob/v$VERSION/CHANGELOG.md).
           EOF
+          if [ "$ALL_PLATFORMS" != "true" ]; then
+            printf '\n%s\n' "This release is for Windows. macOS and Linux builds come with major releases; on those systems the line above installs the newest release that has one." >> "$notes"
+          fi
           cat "$notes"
           { echo; echo "### Release notes"; echo; cat "$notes"; } >> "$GITHUB_STEP_SUMMARY"
 
@@ -292,6 +372,7 @@ jobs:
         if: ${{ inputs.dry_run }}
         env:
           VERSION: ${{ steps.cut.outputs.version }}
+          TARGETS: ${{ steps.platforms.outputs.targets }}
         run: |
           echo "Rehearsal: nothing was pushed, built or published."
           echo "A real run would push the commit above and the tag v$VERSION, create a draft release, build $TARGETS, and publish."
@@ -321,28 +402,13 @@ jobs:
   build:
     name: Build ${{ matrix.target }}
     needs: prepare
-    if: ${{ !inputs.dry_run }}
+    # !failure() rather than the default: prepare comes after a job that is
+    # skipped for Windows-only releases, and a skip would otherwise skip
+    # everything after it.
+    if: ${{ !failure() && !cancelled() && !inputs.dry_run }}
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - target: windows-x86_64
-            os: windows-latest
-            triple: x86_64-pc-windows-msvc
-          - target: macos-aarch64
-            os: macos-latest
-            triple: aarch64-apple-darwin
-          # Built on the Apple silicon runner for Intel: Apple's toolchain
-          # targets both, and Intel runners are being retired.
-          - target: macos-x86_64
-            os: macos-latest
-            triple: x86_64-apple-darwin
-          # The oldest supported Ubuntu runner, so the binary needs only the
-          # glibc of Ubuntu 22.04 (2.35) and runs on more distributions than
-          # one built on the newest.
-          - target: linux-x86_64
-            os: ubuntu-22.04
-            triple: x86_64-unknown-linux-gnu
+      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     env:
@@ -433,12 +499,15 @@ jobs:
   publish:
     name: Publish
     needs: [prepare, build]
-    if: ${{ !inputs.dry_run }}
+    # Only when every build succeeded: failure() is true if any did not.
+    if: ${{ !failure() && !cancelled() && !inputs.dry_run }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
       VERSION: ${{ needs.prepare.outputs.version }}
       SIGNED: ${{ needs.prepare.outputs.signed }}
+      # Only the platforms this release was built for.
+      TARGETS: ${{ needs.prepare.outputs.targets }}
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
     steps:
