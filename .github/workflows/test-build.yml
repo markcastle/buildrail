@@ -107,9 +107,18 @@ jobs:
         run: |
           gh release download "$MESA_VERSION" --repo pal1000/mesa-dist-win \
             --pattern "mesa3d-$MESA_VERSION-release-msvc.7z" --output mesa.7z
-          7z x mesa.7z -omesa "x64/opengl32.dll" "x64/libgallium_wgl.dll" "x64/libglapi.dll" > /dev/null || true
-          ls -l mesa/x64
-          cp mesa/x64/*.dll program/
+          7z x mesa.7z -omesa > /dev/null
+          # The folder layout inside the archive has changed between Mesa
+          # releases, so look for the 64-bit opengl32.dll wherever it is.
+          dll=$(find mesa -ipath '*x64*' -name opengl32.dll | head -n 1)
+          if [ -z "$dll" ]; then
+            echo "::error::No 64-bit opengl32.dll in the Mesa archive"; find mesa -maxdepth 2; exit 1
+          fi
+          dir=$(dirname "$dll")
+          for name in opengl32.dll libgallium_wgl.dll libglapi.dll; do
+            if [ -f "$dir/$name" ]; then cp "$dir/$name" program/; fi
+          done
+          ls -l program
 
       # Start the demo with its files in a scratch folder, give it ten
       # seconds to dock, photograph the whole desktop, then ask it to close
