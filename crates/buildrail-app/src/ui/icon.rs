@@ -16,6 +16,12 @@ const RAIL: [u8; 3] = [0x6b, 0x7a, 0x8c];
 /// The stops: passed, in progress, failed.
 const STOPS: [[u8; 3]; 3] = [[0x3f, 0xb9, 0x50], [0xe3, 0xa4, 0x2b], [0xf2, 0x5c, 0x54]];
 
+/// Where stop `index` sits on the rail, and how big it is.
+fn stop_x(index: usize) -> f32 {
+    0.29 + 0.21 * index as f32
+}
+const STOP_RADIUS: f32 = 0.085;
+
 /// Supersampling grid per pixel edge (antialiasing).
 const SAMPLES: u32 = 4;
 
@@ -28,19 +34,14 @@ fn shade(x: f32, y: f32) -> Option<[u8; 3]> {
         colour = Some(TILE);
     }
     // The rail, with round ends.
-    if capsule(x, y, 0.16, 0.84, 0.5, 0.045) {
+    if capsule(x, y, 0.13, 0.87, 0.5, 0.04) {
         colour = Some(RAIL);
     }
     for (index, stop) in STOPS.iter().enumerate() {
-        let cx = 0.27 + 0.23 * index as f32;
-        let d = ((x - cx).powi(2) + (y - 0.5).powi(2)).sqrt();
-        // A ring of tile colour separates each stop from the rail.
-        if d <= 0.145 {
-            colour = Some(TILE);
-        }
-        let hollow = index == 1;
-        if d <= 0.11 && !(hollow && d < 0.06) {
-            colour = Some(*stop);
+        let d = ((x - stop_x(index)).powi(2) + (y - 0.5).powi(2)).sqrt();
+        // The middle stop is a ring: in progress.
+        if d <= STOP_RADIUS {
+            colour = Some(if index == 1 && d < 0.045 { TILE } else { *stop });
         }
     }
     colour
@@ -117,7 +118,10 @@ mod tests {
         };
         assert_eq!(at(0, 0)[3], 0, "rounded corner");
         assert_eq!(at(32, 10), [TILE[0], TILE[1], TILE[2], 255]);
-        let stop = |index: u32| at((size as f32 * (0.27 + 0.23 * index as f32)) as u32 + 4, 32);
+        // The rail shows at its ends and between the stops.
+        assert_eq!(at(10, 32)[..3], RAIL);
+        assert_eq!(at(25, 32)[..3], RAIL);
+        let stop = |index: usize| at((size as f32 * stop_x(index)) as u32 + 3, 32);
         assert_eq!(stop(0)[..3], STOPS[0]);
         assert_eq!(stop(2)[..3], STOPS[2]);
         // The middle stop is hollow.
