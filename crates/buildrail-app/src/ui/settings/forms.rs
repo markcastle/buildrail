@@ -157,7 +157,7 @@ pub(super) fn loadable<'a, T>(
     }
 }
 
-/// A muted "Loading…" line with the pending glyph.
+/// A muted "Loading…" line with the (still) in-progress glyph.
 pub(super) fn loading(ui: &mut Ui, tokens: &Tokens, sentence: &str) {
     ui.horizontal(|ui| {
         let (rect, _) = ui.allocate_exact_size(
@@ -171,10 +171,9 @@ pub(super) fn loading(ui: &mut Ui, tokens: &Tokens, sentence: &str) {
             crate::presentation::IconKind::Spinner,
             tokens.text_muted,
             tokens.bg,
-            ui.input(|i| i.time),
+            // Still, like the strip: the job's result repaints the page.
+            0,
         );
-        ui.ctx()
-            .request_repaint_after(std::time::Duration::from_millis(60));
         let galley = widgets::text(
             ui,
             crate::ui::theme::type_style::BODY,

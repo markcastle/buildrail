@@ -283,6 +283,8 @@ impl eframe::App for StripWindow {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used)]
+
     use buildrail_platform::dock::UnsupportedReason;
     use buildrail_platform::geometry::{MonitorId, PhysicalRect};
 

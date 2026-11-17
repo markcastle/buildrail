@@ -148,22 +148,26 @@ Set `BUILDRAIL_CONFIG_DIR` to point the app at a scratch folder, so you can expe
 
 ## Releasing
 
-The Release workflow builds the Windows executable.
+Releases are cut by a button, and the changelog decides the version.
 
-- **To try a build without releasing**, open the Actions tab, choose Release, and press "Run workflow". The zip is attached to the run as an artifact.
-- **To publish a release**, set the version in the root `Cargo.toml`, add a section to `CHANGELOG.md`, merge, then create a matching tag. The workflow refuses a tag that does not match the version. You can create the tag either way:
-    - On GitHub: Releases, "Draft a new release", type the tag (for example `v0.1.0`), target `main`, and publish. The workflow attaches the zip a few minutes later.
-    - From a clone, with the two commands below.
+- **While working,** add a line under `## [Unreleased]` in `CHANGELOG.md` in the same pull request, written for the people using BuildRail. Anything **Added** or **Removed** makes the next release a minor one; changes and fixes make a patch.
+- **To release,** open Actions, pick **Release**, press **Run workflow** and leave the version blank. It checks CI passed, sets the version everywhere, tags, builds for Windows, macOS (Apple silicon and Intel) and Linux, and publishes once every download is attached. Tick **Rehearse** to see what it would do without doing it.
+- **To undo a bad release,** run **Roll back** with the last good version and a sentence on why.
+- **To try a pull request,** download the Windows test build from its checks.
 
-```bash
-git tag v0.1.0
+Do not make tags or set the version by hand: a pushed tag builds nothing. Everything else, including the one-time update signing setup, is in [docs/releasing.md](docs/releasing.md).
+
+Install or update in one line. Windows, in PowerShell:
+
+```powershell
+irm https://raw.githubusercontent.com/markcastle/buildrail/main/scripts/install.ps1 | iex
 ```
 
-```bash
-git push origin v0.1.0
-```
+macOS and Linux:
 
-The release gets a zip containing `buildrail.exe`, a `Try the demo.cmd` you can double-click to see the strip with made-up builds, and this README, plus a SHA-256 checksum. The exe is not code-signed, so Windows SmartScreen will warn the first time it runs.
+```bash
+curl -fsSL https://raw.githubusercontent.com/markcastle/buildrail/main/scripts/install.sh | sh
+```
 
 ## Acceptance checklist for each operating system
 
@@ -184,3 +188,5 @@ These are the checks that cannot be automated here and need a person at a real d
 - Sign-in through the browser. Connecting is by pasted token; the code has a seam for a device flow.
 - Reserving a screen edge on Wayland and macOS.
 - A native file picker for import. You type or paste the path.
+- Operating-system code signing. Windows SmartScreen and macOS Gatekeeper warn the first time you run a copy you downloaded by hand; updates through the app are not affected.
+- A macOS app bundle. On macOS BuildRail is a single program, with no Dock or Launchpad icon.

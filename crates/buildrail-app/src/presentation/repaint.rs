@@ -247,10 +247,10 @@ mod tests {
             planner.next_repaint(&model, now),
             Some(Duration::from_secs(30) + CHANGE_SLACK)
         );
-        // An overdue change paints at once.
+        // Just after it, the next one is a minute on ("3 min ago" until 240 s).
         assert_eq!(
             planner.next_repaint(&model, t(31)),
-            Some(Duration::from_secs(29) + CHANGE_SLACK)
+            Some(Duration::from_secs(59) + CHANGE_SLACK)
         );
     }
 
