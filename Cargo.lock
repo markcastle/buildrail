@@ -618,6 +618,7 @@ dependencies = [
  "egui_kittest",
  "image",
  "raw-window-handle",
+ "skrifa",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",

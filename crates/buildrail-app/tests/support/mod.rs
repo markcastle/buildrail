@@ -418,3 +418,100 @@ pub fn save_png(image: &image::RgbaImage, path: &Path) {
     }
     image.save(path).unwrap();
 }
+
+// --------------------------------------------------------------- demo
+
+/// A UI showing the demo profile (four GitHub workflows and Cloudflare
+/// Workers cycling through states) at a fixed instant, in `theme`.
+pub fn demo_ui(f: &Fixture, theme: buildrail_profile::Theme) -> BuildRailUi {
+    use buildrail_app::demo::{demo_connections, demo_profile, DemoRunSource, PHASE_SECS};
+    use buildrail_app::fakes::ManualClock;
+    use buildrail_core::refresh::SourceRegistry;
+
+    let clock = Arc::new(ManualClock::new(t0()));
+    let epoch = t0() - TimeDelta::seconds(PHASE_SECS * 3);
+    f.paths
+        .profile_store()
+        .save(&demo_profile().unwrap())
+        .unwrap();
+    let mut prefs = DevicePrefs::default();
+    for (alias, connection) in demo_connections() {
+        prefs
+            .connections
+            .insert(ConnectionAlias::new(alias), connection);
+        f.world
+            .credentials
+            .write(&ConnectionAlias::new(alias), &Secret::new("t"))
+            .unwrap();
+    }
+    prefs.theme = theme;
+    f.paths.device_prefs_store().save(&prefs).unwrap();
+    let mut services = f.world.services(&f.paths);
+    services.clock = clock.clone();
+    services.sources = SourceRegistry::new()
+        .with(Arc::new(DemoRunSource::new(
+            ProviderKind::GitHub,
+            clock.clone(),
+            epoch,
+        )))
+        .with(Arc::new(DemoRunSource::new(
+            ProviderKind::Cloudflare,
+            clock,
+            epoch,
+        )));
+    let controller = AppController::start(
+        services,
+        Arc::new(f.paths.snapshot_cache()),
+        fast_policy(),
+        f.handle(),
+    );
+    let mut app = BuildRailUi::new(controller);
+    app.set_animate(false);
+    app
+}
+
+/// `true` once every demo entry has its first result.
+pub fn demo_loaded(h: &Harness<'_, BuildRailUi>) -> bool {
+    use egui_kittest::kittest::Queryable;
+    h.query_by_label_contains("Checking").is_none()
+        && h.query_by_label_contains("Docs, Cloudflare, No runs yet")
+            .is_some()
+}
+
+/// Where screenshots go: `docs/images/` when `BUILDRAIL_WRITE_SCREENSHOT=1`,
+/// else the test's temp dir.
+pub fn screenshot_path(name: &str) -> std::path::PathBuf {
+    if std::env::var("BUILDRAIL_WRITE_SCREENSHOT").as_deref() == Ok("1") {
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../docs/images")
+            .join(name)
+    } else {
+        std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name)
+    }
+}
+
+/// The text field named `name` (a row's visible label has the same name).
+pub fn field<'h>(h: &'h Harness<'_, BuildRailUi>, name: &'h str) -> egui_kittest::Node<'h> {
+    use egui::accesskit::Role;
+    use egui_kittest::kittest::{NodeT, Queryable};
+    h.query_all_by_label(name)
+        .find(|n| {
+            matches!(
+                n.accesskit_node().role(),
+                Role::TextInput | Role::PasswordInput | Role::MultilineTextInput
+            )
+        })
+        .unwrap_or_else(|| panic!("no field {name:?}"))
+}
+
+/// Focuses the field `name` and types `text` into it.
+pub fn type_into(h: &mut Harness<'_, BuildRailUi>, name: &str, text: &str) {
+    field(h, name).focus();
+    for _ in 0..3 {
+        h.step();
+    }
+    field(h, name).type_text(text);
+    for _ in 0..3 {
+        h.step();
+    }
+}

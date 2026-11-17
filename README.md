@@ -2,7 +2,7 @@
 
 BuildRail is a thin strip along the bottom of your screen that tells you, at a glance, whether the builds you care about are passing. Pin a GitHub Actions workflow or a Cloudflare Worker, and its entry stays in the same place all day, so you learn where to look.
 
-![The BuildRail strip in demo mode](docs/images/strip-demo.png)
+![The BuildRail strip in demo mode](docs/images/strip-dark.png)
 
 It talks to GitHub and Cloudflare directly with a read-only token that you supply. There is no BuildRail account and no BuildRail server.
 

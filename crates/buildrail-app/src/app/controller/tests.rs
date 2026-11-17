@@ -276,7 +276,7 @@ fn catalog_queries_use_stored_credential() {
     };
     let missing = ask(&mut t, "work", CatalogQuery::Repositories).unwrap_err();
     assert!(missing.is_access());
-    assert!(missing.message().contains("No token is stored"));
+    assert!(missing.message().contains("There is no token for"));
 
     t.world
         .credentials

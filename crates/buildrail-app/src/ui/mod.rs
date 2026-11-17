@@ -1,22 +1,30 @@
 //! The egui layer: draws the view-models and settings machines, nothing
-//! more.
+//! more, in the Task Rail design system.
 //!
+//! * [`theme`] – the design tokens: colour (light and dark, contrast
+//!   tested), type, space, radius and the card shadow.
+//! * [`fonts`] – the operating system's own interface font, found on disk
+//!   behind the [`fonts::FontSource`] seam.
+//! * [`style`] – the tokens applied to egui's own style.
+//! * [`glyphs`] – vector glyphs in the lucide manner and provider marks.
+//! * [`widgets`] – small widgets, one per Task Rail component.
 //! * [`strip`] – the 24 px strip widget (entries, overflow, detail popup).
-//! * [`glyphs`] – vector status icons and provider marks.
-//! * [`theme`] – light/dark palettes with tested WCAG-AA contrast.
-//! * [`settings`] – the Settings window (tabs, wizard, import, device).
+//! * [`settings`] – the Settings window (navigation, pages, wizard, import).
 //! * [`app`] – [`BuildRailUi`], one frame of the whole UI; used by the real
 //!   window and by `egui_kittest` tests alike.
 //! * [`window`] – the eframe glue (window options, dock wiring). The only
 //!   part that needs a real window.
 
 pub mod app;
+pub mod fonts;
 pub mod glyphs;
 pub mod settings;
 pub mod strip;
+pub mod style;
 pub mod theme;
+pub mod widgets;
 pub mod window;
 
 pub use app::{BuildRailUi, FrameOutput};
 pub use strip::{StripAction, StripView, STRIP_HEIGHT};
-pub use theme::{Palette, DARK, LIGHT};
+pub use theme::{Tokens, DARK, LIGHT};

@@ -280,7 +280,7 @@ impl LoadError {
                 "{name} could not find this, or the token cannot see it."
             )),
             ProviderError::RateLimited { .. } => {
-                Self::Other(format!("{name} asked us to slow down. Try again in a minute."))
+                Self::Other(format!("{name} is limiting requests for now. Try again in a minute."))
             }
             ProviderError::Network(_) => Self::Other(format!(
                 "Could not reach {name}. Check your network connection and try again."
@@ -289,7 +289,7 @@ impl LoadError {
                 Self::Other(format!("{name} had a problem (HTTP {status}). Try again later."))
             }
             ProviderError::Malformed(_) => {
-                Self::Other(format!("{name} sent a response BuildRail could not read."))
+                Self::Other(format!("{name} sent a response BuildRail could not read. Try again later."))
             }
         }
     }
@@ -297,7 +297,7 @@ impl LoadError {
     /// No credential is stored for the connection.
     pub fn missing_credential(alias: &ConnectionAlias) -> Self {
         Self::Access(format!(
-            "No token is stored for connection \"{alias}\" on this device; reconnect it."
+            "There is no token for the “{alias}” connection on this device. Reconnect it to add one."
         ))
     }
 
@@ -477,7 +477,7 @@ mod tests {
         }
         let missing = LoadError::missing_credential(&ConnectionAlias::new("work"));
         assert!(missing.is_access());
-        assert!(missing.message().contains("\"work\""));
+        assert!(missing.message().contains("“work”"));
     }
 
     #[test]
