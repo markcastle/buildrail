@@ -52,8 +52,8 @@ use thiserror::Error;
 use tokio::runtime::Handle;
 
 use crate::app::{
-    AppController, Catalogs, InstanceLock, Lifecycle, NoUpdates, ReleaseOnDrop, Services,
-    UpdateService,
+    AppController, Catalogs, DetailsSources, InstanceLock, Lifecycle, NoUpdates, ReleaseOnDrop,
+    Services, UpdateService,
 };
 use crate::demo::{demo_connections, demo_profile, DemoRunSource, LoggingUrlOpener};
 use crate::dialogs::RfdFileDialog;
@@ -355,6 +355,7 @@ pub fn production_services(paths: &AppPaths, runtime: &Handle) -> Result<Service
         .ok();
     Ok(Services {
         sources: providers.run_sources().into_iter().collect(),
+        details: providers.details_sources().into_iter().collect(),
         catalogs: Catalogs::from_pair(
             providers.github_catalog.clone(),
             providers.cloudflare_catalog.clone(),
@@ -378,20 +379,20 @@ pub fn production_services(paths: &AppPaths, runtime: &Handle) -> Result<Service
 pub fn demo_services(paths: &AppPaths, runtime: &Handle) -> Result<Services, StartError> {
     let clock: Arc<dyn Clock> = Arc::new(SystemClock);
     let epoch = clock.now();
-    let sources: SourceRegistry = [
-        Arc::new(DemoRunSource::new(
-            buildrail_core::domain::ProviderKind::GitHub,
-            clock.clone(),
-            epoch,
-        )) as Arc<dyn buildrail_core::ports::RunSource>,
-        Arc::new(DemoRunSource::new(
-            buildrail_core::domain::ProviderKind::Cloudflare,
-            clock.clone(),
-            epoch,
-        )),
-    ]
-    .into_iter()
-    .collect();
+    let github = Arc::new(DemoRunSource::new(
+        buildrail_core::domain::ProviderKind::GitHub,
+        clock.clone(),
+        epoch,
+    ));
+    let cloudflare = Arc::new(DemoRunSource::new(
+        buildrail_core::domain::ProviderKind::Cloudflare,
+        clock.clone(),
+        epoch,
+    ));
+    let sources = SourceRegistry::new()
+        .with(github.clone())
+        .with(cloudflare.clone());
+    let details = DetailsSources::new().with(github).with(cloudflare);
     let credentials = InMemoryCredentialStore::with_entries(
         demo_connections()
             .into_iter()
@@ -418,6 +419,7 @@ pub fn demo_services(paths: &AppPaths, runtime: &Handle) -> Result<Services, Sta
     let catalog = Arc::new(FakeCatalog::default());
     Ok(Services {
         sources,
+        details,
         catalogs: Catalogs::from_pair(catalog.clone(), catalog),
         credentials: Arc::new(credentials),
         clock,

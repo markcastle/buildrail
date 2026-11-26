@@ -13,6 +13,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use thiserror::Error;
 
+use crate::details::{RunDetails, RunRef};
 use crate::domain::{BuildRecord, ConnectionAlias, ProviderKind, WatchSnapshot, WatchTarget};
 
 /// A provider credential. `Debug` and `Display` never print the value, so a
@@ -102,6 +103,27 @@ pub trait RunSource: Send + Sync {
         target: &WatchTarget,
         credential: &Secret,
     ) -> Result<Vec<BuildRecord>, ProviderError>;
+}
+
+/// Reads the details of one run: its jobs, who or what started it, its
+/// timings. One implementation per provider.
+///
+/// Kept apart from [`RunSource`] on purpose (interface segregation): the
+/// refresh engine polls runs and never asks for details; the details panel
+/// asks for them on demand, only while a person is looking.
+#[async_trait]
+pub trait RunDetailsSource: Send + Sync {
+    /// The provider this source talks to.
+    fn provider(&self) -> ProviderKind;
+
+    /// The details of `run` of `target`. A run the provider no longer has
+    /// is [`ProviderError::NotFound`].
+    async fn run_details(
+        &self,
+        target: &WatchTarget,
+        run: &RunRef,
+        credential: &Secret,
+    ) -> Result<RunDetails, ProviderError>;
 }
 
 /// Read access to stored provider credentials.

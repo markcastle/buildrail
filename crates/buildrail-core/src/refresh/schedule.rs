@@ -231,6 +231,21 @@ impl Schedule {
         }
     }
 
+    /// Makes one key due immediately and forgets its backoff, like
+    /// [`refresh_all`](Self::refresh_all) for a single request ("Refresh
+    /// now" in a build's details). Unknown keys are ignored; rate-limit
+    /// gates still apply.
+    pub fn refresh_one(&mut self, key: &RequestKey, now: Instant) {
+        if let Some(entry) = self.entry_mut(key) {
+            entry.failures = 0;
+            if entry.in_flight {
+                entry.refresh_after_flight = true;
+            } else {
+                entry.next_due = now;
+            }
+        }
+    }
+
     /// When the caller should next call [`take_due`](Self::take_due):
     /// the earliest effective due time among keys not in flight. `None`
     /// when nothing is waiting (no keys, or all in flight).
@@ -498,6 +513,29 @@ mod tests {
         s.take_due(t0 + secs(2));
         s.record(&a, Outcome::Success { active: false }, t0 + secs(3));
         assert_eq!(s.due_at(&a), Some(t0 + secs(63)), "flag is one-shot");
+    }
+
+    #[test]
+    fn refresh_one_touches_only_its_key() {
+        let t0 = Instant::now();
+        let a = gh("w", "a");
+        let b = gh("w", "b");
+        let mut s = schedule_with(&[a.clone(), b.clone()], t0);
+        s.take_due(t0);
+        s.record(&a, Outcome::Failure, t0);
+        s.record(&b, Outcome::Failure, t0);
+        let t1 = t0 + secs(5);
+        s.refresh_one(&a, t1);
+        assert_eq!(s.failures(&a), 0);
+        assert_eq!(s.failures(&b), 1);
+        assert_eq!(s.take_due(t1), vec![a.clone()]);
+        // In flight: fetched again once the request completes.
+        s.refresh_one(&a, t1 + secs(1));
+        s.record(&a, Outcome::Success { active: false }, t1 + secs(2));
+        assert_eq!(s.due_at(&a), Some(t1 + secs(2)));
+        // Unknown keys are ignored.
+        s.refresh_one(&gh("w", "zzz"), t1);
+        assert_eq!(s.len(), 2);
     }
 
     #[test]

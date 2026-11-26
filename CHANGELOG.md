@@ -15,10 +15,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 - **An Animation switch in Settings › Strip,** for a building mark that turns while a build runs.
 - **A log of what BuildRail did recently,** kept for a few days and never holding a token. Settings › About › Open log folder shows it, which helps when something goes wrong.
 - **BuildRail has its own icon,** on the window and on the Windows program file.
+- **Click a build to see its details.** A panel opens beside the strip with the build's jobs (failed ones first, with the step that failed), who or what started it, when it started and how long it took, and how its recent runs went, so you can tell a one-off from a build that has been failing all day. Open run, Refresh now, Copy link and Edit in Settings are in the panel. A build that needs reconnecting explains why and offers Reconnect. Press Esc, click the build again, or use the close button to put it away. Double-click a build, middle-click it, or press Ctrl+Enter on it to go straight to the run.
 - **The strip can sit at the top of the screen.** Settings › Strip › Placement offers Top, Bottom and Floating. At the top, maximised windows start below the strip, and its details open downwards.
 
 ### Changed
 
+- **Clicking a build, or pressing Enter on it, now shows its details** instead of opening the run in your browser. Double-click it, middle-click it, or press Ctrl+Enter to open the run as before.
 - **The strip uses far less power when nothing is happening.** It no longer redraws itself on a timer while your builds sit still, and it no longer rewrites its saved state every minute, so a laptop on battery barely notices it.
 - **The building mark holds still** unless you turn on Animation.
 - **Import and export open your system's own file picker,** instead of asking you to type a path.

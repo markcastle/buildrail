@@ -462,17 +462,18 @@ pub fn demo_ui(f: &Fixture, theme: buildrail_profile::Theme) -> BuildRailUi {
     f.paths.device_prefs_store().save(&prefs).unwrap();
     let mut services = f.world.services(&f.paths);
     services.clock = clock.clone();
+    let github = Arc::new(DemoRunSource::new(
+        ProviderKind::GitHub,
+        clock.clone(),
+        epoch,
+    ));
+    let cloudflare = Arc::new(DemoRunSource::new(ProviderKind::Cloudflare, clock, epoch));
     services.sources = SourceRegistry::new()
-        .with(Arc::new(DemoRunSource::new(
-            ProviderKind::GitHub,
-            clock.clone(),
-            epoch,
-        )))
-        .with(Arc::new(DemoRunSource::new(
-            ProviderKind::Cloudflare,
-            clock,
-            epoch,
-        )));
+        .with(github.clone())
+        .with(cloudflare.clone());
+    services.details = buildrail_app::app::DetailsSources::new()
+        .with(github)
+        .with(cloudflare);
     let controller = AppController::start(
         services,
         Arc::new(f.paths.snapshot_cache()),

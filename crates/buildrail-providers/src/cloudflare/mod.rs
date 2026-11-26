@@ -2,6 +2,10 @@
 //!
 //! * [`CloudflareBuilds`] implements
 //!   [`RunSource`](buildrail_core::ports::RunSource).
+//! * The same [`CloudflareBuilds`] implements
+//!   [`RunDetailsSource`](buildrail_core::ports::RunDetailsSource) from
+//!   the builds list (commit message, author, trigger, timings; Workers
+//!   Builds documents no stages, so there are no jobs). See `details.rs`.
 //! * [`CloudflareCatalog`] implements the Cloudflare catalogue traits.
 //!
 //! # Endpoints used
@@ -40,6 +44,7 @@
 //!   `errors`; these are mapped to `AccessDenied`.
 
 mod catalog;
+mod details;
 mod runs;
 pub mod status;
 

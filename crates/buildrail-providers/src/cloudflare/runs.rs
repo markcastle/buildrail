@@ -18,7 +18,12 @@ pub const DEFAULT_BUILD_LIMIT: usize = 10;
 
 /// Page size used when a branch filter is set: the API cannot filter by
 /// branch, so fetch more and filter locally.
-const FILTERED_PAGE_SIZE: usize = 50;
+pub(super) const FILTERED_PAGE_SIZE: usize = 50;
+
+/// How long a listed page of builds may be reused by the details panel
+/// (which asks for the run history and then one build's details in the
+/// same breath: one list request serves both).
+pub(super) const LIST_REUSE: chrono::TimeDelta = chrono::TimeDelta::seconds(10);
 
 /// Reads recent Workers Builds for a Worker.
 ///
@@ -36,7 +41,11 @@ pub struct CloudflareBuilds {
     base_url: String,
     limit: usize,
     tags: Mutex<HashMap<(String, String, u64), String>>,
+    /// The last list per (account, Worker, credential), with when it came.
+    lists: Mutex<BuildLists>,
 }
+
+type BuildLists = HashMap<(String, String, u64), (DateTime<Utc>, Vec<WireBuild>)>;
 
 impl std::fmt::Debug for CloudflareBuilds {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -56,6 +65,7 @@ impl CloudflareBuilds {
             base_url: CLOUDFLARE_API_URL.to_owned(),
             limit: DEFAULT_BUILD_LIMIT,
             tags: Mutex::new(HashMap::new()),
+            lists: Mutex::new(HashMap::new()),
         }
     }
 
@@ -111,6 +121,74 @@ impl CloudflareBuilds {
             })
     }
 
+    /// Lists builds for a Worker by name: resolves (or reuses) its tag and
+    /// lists its builds, resolving the tag again once if a cached one is
+    /// answered with 404. The list is remembered briefly so the details
+    /// panel can read a build from it without asking again
+    /// ([`Self::recent_list`]).
+    pub(super) async fn fetch_builds(
+        &self,
+        account_id: &str,
+        worker: &str,
+        page_size: usize,
+        credential: &Secret,
+    ) -> Result<Vec<WireBuild>, ProviderError> {
+        let key = (
+            account_id.to_owned(),
+            worker.to_owned(),
+            fingerprint(credential),
+        );
+        let builds = match self.cached_tag(&key) {
+            Some(tag) => match self
+                .list_builds(account_id, &tag, page_size, credential)
+                .await
+            {
+                Err(ProviderError::NotFound { .. }) => {
+                    self.store_tag(key.clone(), None);
+                    None
+                }
+                other => Some(other?),
+            },
+            None => None,
+        };
+        let builds = match builds {
+            Some(builds) => builds,
+            None => {
+                let tag = self.resolve_tag(account_id, worker, credential).await?;
+                self.store_tag(key.clone(), Some(tag.clone()));
+                self.list_builds(account_id, &tag, page_size, credential)
+                    .await?
+            }
+        };
+        let now = self.transport.now();
+        self.lists
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(key, (now, builds.clone()));
+        Ok(builds)
+    }
+
+    /// The builds listed for this Worker and credential within the last
+    /// [`LIST_REUSE`], if any.
+    pub(super) fn recent_list(
+        &self,
+        account_id: &str,
+        worker: &str,
+        credential: &Secret,
+    ) -> Option<Vec<WireBuild>> {
+        let key = (
+            account_id.to_owned(),
+            worker.to_owned(),
+            fingerprint(credential),
+        );
+        let now = self.transport.now();
+        let lists = self.lists.lock().unwrap_or_else(|p| p.into_inner());
+        lists
+            .get(&key)
+            .filter(|(at, _)| now - *at <= LIST_REUSE && *at <= now)
+            .map(|(_, builds)| builds.clone())
+    }
+
     async fn list_builds(
         &self,
         account_id: &str,
@@ -158,29 +236,9 @@ impl RunSource for CloudflareBuilds {
             self.limit
         };
 
-        let key = (account_id.clone(), worker.clone(), fingerprint(credential));
-        let builds = match self.cached_tag(&key) {
-            Some(tag) => match self
-                .list_builds(account_id, &tag, page_size, credential)
-                .await
-            {
-                Err(ProviderError::NotFound { .. }) => {
-                    self.store_tag(key.clone(), None);
-                    None
-                }
-                other => Some(other?),
-            },
-            None => None,
-        };
-        let builds = match builds {
-            Some(builds) => builds,
-            None => {
-                let tag = self.resolve_tag(account_id, worker, credential).await?;
-                self.store_tag(key, Some(tag.clone()));
-                self.list_builds(account_id, &tag, page_size, credential)
-                    .await?
-            }
-        };
+        let builds = self
+            .fetch_builds(account_id, worker, page_size, credential)
+            .await?;
         let now = self.transport.now();
 
         let mut records: Vec<BuildRecord> = builds
@@ -203,26 +261,31 @@ struct WireScript {
     tag: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
-struct WireBuild {
-    build_uuid: String,
-    status: String,
-    build_outcome: Option<String>,
-    created_on: DateTime<Utc>,
-    modified_on: Option<DateTime<Utc>>,
-    stopped_on: Option<DateTime<Utc>>,
-    build_trigger_metadata: Option<WireTriggerMetadata>,
+#[derive(Debug, Clone, Deserialize)]
+pub(super) struct WireBuild {
+    pub(super) build_uuid: String,
+    pub(super) status: String,
+    pub(super) build_outcome: Option<String>,
+    pub(super) created_on: DateTime<Utc>,
+    pub(super) initializing_on: Option<DateTime<Utc>>,
+    pub(super) running_on: Option<DateTime<Utc>>,
+    pub(super) modified_on: Option<DateTime<Utc>>,
+    pub(super) stopped_on: Option<DateTime<Utc>>,
+    pub(super) build_trigger_metadata: Option<WireTriggerMetadata>,
     trigger: Option<WireTrigger>,
 }
 
-#[derive(Debug, Deserialize)]
-struct WireTriggerMetadata {
+#[derive(Debug, Clone, Deserialize)]
+pub(super) struct WireTriggerMetadata {
+    pub(super) build_trigger_source: Option<String>,
     branch: Option<String>,
     commit_hash: Option<String>,
+    pub(super) commit_message: Option<String>,
+    pub(super) author: Option<String>,
     deploy_command: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 struct WireTrigger {
     branch_includes: Option<Vec<String>>,
     #[serde(default)]
@@ -231,13 +294,13 @@ struct WireTrigger {
 }
 
 impl WireBuild {
-    fn branch(&self) -> Option<&str> {
+    pub(super) fn branch(&self) -> Option<&str> {
         self.build_trigger_metadata
             .as_ref()
             .and_then(|m| m.branch.as_deref())
     }
 
-    fn production_deploy(&self) -> bool {
+    pub(super) fn production_deploy(&self) -> bool {
         let Some(trigger) = &self.trigger else {
             return false;
         };

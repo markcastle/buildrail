@@ -10,12 +10,16 @@
 //!   ([`RepaintPlanner`]): only when what it shows changes.
 //! * [`update`] – what the strip and About say about updates, and when an
 //!   automatic install may start.
+//! * [`details`] – [`DetailsModel::build`]: what a build's details panel
+//!   says (this run, jobs failed first, recent runs, the actions), its
+//!   wording of durations and triggers, and when its words next change.
 //! * [`popup`] – where the strip's pop-up cards go, in physical pixels on
 //!   the strip's own monitor, and when a pop-up window is in place to be
 //!   shown.
 //!
 //! Nothing here depends on egui; the `ui` module draws these models.
 
+pub mod details;
 pub mod overflow;
 pub mod popup;
 pub mod repaint;
@@ -23,6 +27,10 @@ pub mod strip;
 pub mod text;
 pub mod update;
 
+pub use details::{
+    DetailsInput, DetailsModel, Fact, JobRow, JobsSection, LoadLine, MoreLink, Notice, PanelAction,
+    PanelButton, RecentRun, RecentSection,
+};
 pub use overflow::{fit, OverflowGroup, OverflowLayout};
 pub use popup::{
     monitor_under, popup_rect, PopupAlign, PopupPlacement, PopupRequest, PopupStep, StripSide,

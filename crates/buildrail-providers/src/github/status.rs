@@ -11,6 +11,7 @@
 //!   `timed_out`, `startup_failure`, `cancelled`, `skipped`, `neutral`,
 //!   `action_required`, `stale`, or `null`.
 
+use buildrail_core::details::Trigger;
 use buildrail_core::domain::BuildStatus;
 
 /// Maps a workflow run's `status` and `conclusion` to a [`BuildStatus`].
@@ -38,6 +39,26 @@ pub fn map_conclusion(conclusion: Option<&str>) -> BuildStatus {
         // `neutral`, `action_required` (needs approval), `stale` (GitHub gave
         // up on it) and anything new: not a verdict we can colour.
         _ => BuildStatus::Unavailable,
+    }
+}
+
+/// Maps a workflow run's `event` to a provider-neutral [`Trigger`].
+///
+/// The events are GitHub's documented workflow triggers
+/// (<https://docs.github.com/en/actions/writing-workflows/choosing-when-your-workflow-runs/events-that-trigger-workflows>);
+/// the common ones get a neutral name and the rest keep GitHub's word.
+pub fn map_event(event: Option<&str>) -> Trigger {
+    match event {
+        None | Some("") => Trigger::Unknown,
+        Some("push") => Trigger::Push,
+        Some("pull_request" | "pull_request_target" | "pull_request_review") => {
+            Trigger::PullRequest
+        }
+        Some("schedule") => Trigger::Schedule,
+        Some("workflow_dispatch") => Trigger::Manual,
+        Some("repository_dispatch") => Trigger::Api,
+        Some("workflow_run" | "workflow_call") => Trigger::Workflow,
+        Some(other) => Trigger::Other(other.to_owned()),
     }
 }
 
@@ -99,6 +120,25 @@ mod tests {
         assert_eq!(map_run_status(None, None), Unavailable);
         assert_eq!(map_run_status(Some("mystery"), None), Unavailable);
         assert_eq!(map_run_status(None, Some("success")), Passed);
+    }
+
+    #[test]
+    fn events_map_to_triggers() {
+        let cases = [
+            (None, Trigger::Unknown),
+            (Some(""), Trigger::Unknown),
+            (Some("push"), Trigger::Push),
+            (Some("pull_request"), Trigger::PullRequest),
+            (Some("pull_request_target"), Trigger::PullRequest),
+            (Some("schedule"), Trigger::Schedule),
+            (Some("workflow_dispatch"), Trigger::Manual),
+            (Some("repository_dispatch"), Trigger::Api),
+            (Some("workflow_run"), Trigger::Workflow),
+            (Some("release"), Trigger::Other("release".into())),
+        ];
+        for (event, expected) in cases {
+            assert_eq!(map_event(event), expected, "{event:?}");
+        }
     }
 
     #[test]

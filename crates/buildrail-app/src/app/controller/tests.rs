@@ -951,3 +951,5 @@ fn closing_writes_the_cache_and_releases_everything() {
     );
     t.app.close(); // idempotent
 }
+
+mod details;

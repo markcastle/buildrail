@@ -120,6 +120,11 @@ pub struct SettingsWindow {
     about_message: Option<String>,
     /// When a preference last landed (egui time), for the Saved mark.
     saved_at: Option<f64>,
+    /// The build opened from its details panel: outlined on the Builds
+    /// page until the person does something there.
+    highlight: Option<WatchId>,
+    /// Scroll the highlighted build into view on the next frame.
+    scroll_to_highlight: bool,
 }
 
 impl Default for SettingsWindow {
@@ -152,6 +157,8 @@ impl SettingsWindow {
             device_message: None,
             about_message: None,
             saved_at: None,
+            highlight: None,
+            scroll_to_highlight: false,
         }
     }
 
@@ -182,6 +189,20 @@ impl SettingsWindow {
         }
         self.page = Page::Builds;
         self.adding = true;
+    }
+
+    /// Shows the Builds page with `watch` outlined and scrolled into view
+    /// (the details panel's Edit in Settings).
+    pub fn open_build(&mut self, watch: &WatchId) {
+        self.page = Page::Builds;
+        self.adding = false;
+        self.highlight = Some(watch.clone());
+        self.scroll_to_highlight = true;
+    }
+
+    /// The build outlined on the Builds page, if any.
+    pub fn highlighted(&self) -> Option<&WatchId> {
+        self.highlight.as_ref()
     }
 
     /// Shows the Builds page with the reconnect form open for `watch`.
@@ -268,6 +289,10 @@ impl SettingsWindow {
                 });
         });
 
+        if !inputs.is_empty() || self.page != Page::Builds {
+            // Doing something, or going elsewhere, ends the highlight.
+            self.highlight = None;
+        }
         let mut commands = Vec::new();
         {
             let ctx = context(controller);

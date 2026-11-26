@@ -24,6 +24,14 @@
 //! ([`snapshots_differ_visibly`]); a refresh that merely confirms
 //! unchanged data asks for nothing.
 //!
+//! # Details
+//!
+//! A build's details panel is the controller's too
+//! ([`AppController::open_details`], [`AppController::details_panel`]):
+//! details are fetched on demand, once per run attempt and status, and
+//! cached for the session. See `details_flow.rs` and
+//! [`DetailsBook`](super::DetailsBook).
+//!
 //! # Updates
 //!
 //! The controller starts the background update check loop
@@ -122,6 +130,11 @@ enum JobResult {
         alias: ConnectionAlias,
         result: Result<(), String>,
     },
+    Details {
+        request: u64,
+        watch: buildrail_core::domain::WatchId,
+        answer: super::details::DetailsAnswer,
+    },
 }
 
 /// The parts of a [`ConnectRequest`] needed after the job (no secret).
@@ -148,6 +161,7 @@ pub struct AppController {
     cache: Arc<dyn SnapshotCache>,
     lifecycle: Lifecycle,
     updates: SharedUpdates,
+    details: super::details::DetailsBook,
 }
 
 impl AppController {
@@ -227,6 +241,7 @@ impl AppController {
             cache,
             lifecycle: Lifecycle::new(),
             updates,
+            details: super::details::DetailsBook::new(),
         };
         controller.push_watches();
         controller
@@ -444,8 +459,9 @@ impl AppController {
     pub fn poll_events(&mut self) -> Vec<Event> {
         while let Ok(result) = self.jobs_rx.try_recv() {
             self.pending_jobs = self.pending_jobs.saturating_sub(1);
-            let event = self.finish(result);
-            self.ready.push_back(event);
+            if let Some(event) = self.finish(result) {
+                self.ready.push_back(event);
+            }
         }
         self.ready.drain(..).collect()
     }
@@ -460,8 +476,9 @@ impl AppController {
             match self.jobs_rx.recv_timeout(left) {
                 Ok(result) => {
                     self.pending_jobs -= 1;
-                    let event = self.finish(result);
-                    self.ready.push_back(event);
+                    if let Some(event) = self.finish(result) {
+                        self.ready.push_back(event);
+                    }
                 }
                 Err(_) => break,
             }
@@ -497,6 +514,9 @@ impl AppController {
             .save(&profile)
             .map_err(|error| format!("Could not save the profile: {error}"))?;
         self.profile = profile;
+        let profile = &self.profile;
+        self.details
+            .retain(|id| profile.watches().iter().any(|w| &w.id == id));
         self.push_watches();
         Ok(())
     }
@@ -706,10 +726,21 @@ impl AppController {
         });
     }
 
-    /// Controller-side effects of a finished job, on the UI thread.
-    fn finish(&mut self, result: JobResult) -> Event {
-        match result {
+    /// Controller-side effects of a finished job, on the UI thread, and
+    /// the event for the settings machines, if it has one.
+    fn finish(&mut self, result: JobResult) -> Option<Event> {
+        Some(match result {
             JobResult::Event(event) => event,
+            JobResult::Details {
+                request,
+                watch,
+                answer,
+            } => {
+                if !self.details.accept(request, &watch, answer) {
+                    tracing::debug!(%watch, "ignored an outdated details answer");
+                }
+                return None;
+            }
             JobResult::Connected {
                 ticket,
                 request,
@@ -749,7 +780,7 @@ impl AppController {
                 });
                 Event::Saved { ticket, result }
             }
-        }
+        })
     }
 }
 
@@ -811,6 +842,7 @@ async fn verify(
     }
 }
 
+mod details_flow;
 mod update_flow;
 
 #[cfg(test)]
