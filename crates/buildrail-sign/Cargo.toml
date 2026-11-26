@@ -1,0 +1,22 @@
+[package]
+name = "buildrail-sign"
+description = "Release-time tool that signs BuildRail update payloads and writes latest.json."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[[bin]]
+name = "buildrail-sign"
+path = "src/main.rs"
+
+[dependencies]
+buildrail-update.workspace = true
+getrandom = "0.4.3"
+
+[dev-dependencies]
+tempfile = "3.27.0"
+
+[lints]
+workspace = true

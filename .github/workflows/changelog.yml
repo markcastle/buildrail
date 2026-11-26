@@ -1,0 +1,78 @@
+name: Changelog
+
+# A pull request that changes the app must say so under Unreleased in
+# CHANGELOG.md, because that line becomes the release notes and decides the
+# next version number. Writing it now, while the change is fresh, is the
+# whole habit the release process rests on.
+#
+# Exempt: changes only to the release tooling (crates/xtask), only to tests,
+# or only outside crates/. For a change nobody using the app would notice,
+# add the label "no-changelog" to the pull request.
+#
+# Its own workflow, not a job in ci.yml, so that adding or removing the label
+# re-runs this check alone instead of restarting every build and test.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: changelog-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unreleased:
+    name: A changelog line for app changes
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Did the app change without a changelog line?
+        id: needed
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          base=$(git merge-base "$BASE_SHA" "$HEAD_SHA")
+          app=$(git diff --name-only "$base" "$HEAD_SHA" -- crates/ \
+            | grep -v '^crates/xtask/' \
+            | grep -Ev '(^|/)(tests|benches)/|(^|/)tests\.rs$|_tests\.rs$' || true)
+          if [ -z "$app" ]; then
+            echo "No app code changed, so no changelog line is needed."
+            echo "needed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "App files changed:"
+          echo "$app"
+          git show "$base:CHANGELOG.md" > "$RUNNER_TEMP/before.md" 2>/dev/null || : > "$RUNNER_TEMP/before.md"
+          git show "$HEAD_SHA:CHANGELOG.md" > "$RUNNER_TEMP/after.md"
+          echo "base=$base" >> "$GITHUB_OUTPUT"
+          echo "needed=true" >> "$GITHUB_OUTPUT"
+
+      - uses: dtolnay/rust-toolchain@stable
+        if: steps.needed.outputs.needed == 'true'
+
+      - uses: Swatinem/rust-cache@v2
+        if: steps.needed.outputs.needed == 'true'
+
+      - name: Unreleased must have changed
+        if: steps.needed.outputs.needed == 'true'
+        env:
+          NO_CHANGELOG: ${{ contains(github.event.pull_request.labels.*.name, 'no-changelog') }}
+        run: |
+          unreleased() { cargo run --quiet -p xtask -- --changelog "$1" changelog section Unreleased 2>/dev/null || true; }
+          before=$(unreleased "$RUNNER_TEMP/before.md")
+          after=$(unreleased "$RUNNER_TEMP/after.md")
+          if [ "$before" != "$after" ]; then
+            echo "Unreleased in CHANGELOG.md has a line for this change."
+          elif [ "$NO_CHANGELOG" = "true" ]; then
+            echo "::notice::No changelog line, and the pull request is labelled no-changelog."
+          else
+            echo "::error::This changes the app but adds nothing under \"## [Unreleased]\" in CHANGELOG.md. Add a line saying what people will notice (docs/releasing.md), or label the pull request no-changelog if they will not notice anything."
+            exit 1
+          fi

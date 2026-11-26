@@ -91,7 +91,9 @@ impl Grid {
 
 /// Draws `icon` centred on `center`, `size` points across, in `color`.
 /// `ground` is the colour behind it (the failed glyph knocks its cross out
-/// of a filled disc). `time` (seconds) turns the spinner.
+/// of a filled disc). `phase` turns the in-progress glyph by an eighth of a
+/// turn per step; `0` is its resting pose, which is what the strip shows
+/// unless the user turned Animation on.
 pub fn paint_icon(
     painter: &Painter,
     center: Pos2,
@@ -99,7 +101,7 @@ pub fn paint_icon(
     icon: IconKind,
     color: Color32,
     ground: Color32,
-    time: f64,
+    phase: u32,
 ) {
     let g = Grid::new(center, size, color);
     match icon {
@@ -115,13 +117,17 @@ pub fn paint_icon(
             knock.line(painter, &[(9.0, 9.0), (15.0, 15.0)]);
         }
         IconKind::Spinner => {
+            // A faint ring with a bold third of it and a dot at the hub:
+            // reads as "in progress" standing still, and differs in shape
+            // from queued (clock hands) and no runs (dashed ring).
             let faint = Grid {
                 color: color.gamma_multiply(0.3),
                 ..g
             };
             faint.ring(painter, 12.0, 12.0, 9.5);
-            let start = (time as f32 * TAU * 0.8) % TAU - PI / 2.0;
-            g.arc(painter, 12.0, 12.0, 9.5, start, TAU * 0.3);
+            let start = (phase % 8) as f32 * TAU / 8.0 - PI / 2.0;
+            g.arc(painter, 12.0, 12.0, 9.5, start, TAU / 3.0);
+            g.dot(painter, 12.0, 12.0, 2.2);
         }
         IconKind::Queued => {
             g.ring(painter, 12.0, 12.0, 10.0);
@@ -245,7 +251,7 @@ mod tests {
                     *icon,
                     Color32::RED,
                     Color32::BLACK,
-                    1.5,
+                    3,
                 );
             }
             paint_provider_mark(

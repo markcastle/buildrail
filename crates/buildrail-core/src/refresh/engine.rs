@@ -18,6 +18,7 @@ use tokio::time::Instant;
 use super::board::Board;
 use super::fetch::{FetchError, Fetcher, SourceRegistry};
 use super::policy::RefreshPolicy;
+use super::save::{SavePolicy, SaveTracker};
 use super::schedule::{Outcome, Schedule};
 use super::wake::WakeDetector;
 use crate::domain::{BuildRecord, RequestKey, Watch, WatchSnapshot};
@@ -91,6 +92,10 @@ impl RefreshHandle {
 
 /// Polls providers for the pinned watches and publishes snapshots.
 ///
+/// Every change is published; the snapshot cache is written only when a
+/// restart would show something different (see [`super::save`]), and once
+/// more when the engine stops.
+///
 /// Create it with [`new`](Self::new), hand the [`RefreshHandle`] to the UI
 /// and spawn [`run`](Self::run) (or [`run_until`](Self::run_until)) on a
 /// tokio runtime. The engine starts with no watches; send them with
@@ -99,6 +104,7 @@ pub struct RefreshEngine {
     fetcher: Fetcher,
     clock: Arc<dyn Clock>,
     cache: Arc<dyn SnapshotCache>,
+    saves: SaveTracker,
     wake: WakeDetector,
     schedule: Schedule,
     board: Board,
@@ -128,6 +134,7 @@ impl RefreshEngine {
             fetcher: Fetcher::new(sources, credentials, policy.request_timeout),
             clock,
             cache,
+            saves: SaveTracker::new(SavePolicy::default()),
             wake: WakeDetector::new(policy.wake_threshold),
             schedule: Schedule::new(policy),
             board,
@@ -181,6 +188,12 @@ impl RefreshEngine {
             }
         }
         self.in_flight.abort_all();
+        // Write what the save policy held back (timestamp drift), so the
+        // next start shows ages as of now.
+        let snapshots = self.publisher.borrow().clone();
+        if self.saves.flush(&snapshots, Instant::now()) {
+            self.cache.save(&snapshots);
+        }
     }
 
     fn set_watches(&mut self, watches: Vec<Watch>) {
@@ -230,13 +243,16 @@ impl RefreshEngine {
         self.publish();
     }
 
-    /// Publishes and caches the snapshots if they changed.
+    /// Publishes the snapshots if they changed, and caches them when the
+    /// [`SaveTracker`] says a restart would need them.
     fn publish(&mut self) {
         let snapshots = self.board.snapshots();
         if *self.publisher.borrow().as_ref() == snapshots[..] {
             return;
         }
-        self.cache.save(&snapshots);
+        if self.saves.should_save(&snapshots, Instant::now()) {
+            self.cache.save(&snapshots);
+        }
         self.publisher.send_replace(Snapshots::from(snapshots));
     }
 }

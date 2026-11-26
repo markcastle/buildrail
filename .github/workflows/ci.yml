@@ -1,12 +1,25 @@
 name: CI
 
+# Pull requests and pushes test on Linux and Windows. macOS is built only
+# for major releases, so it is tested only then: the Release workflow runs
+# the tests on macOS itself before it tags a release that includes macOS.
+# To test every platform on demand, run this workflow from the Actions tab
+# with "Also test on macOS" ticked.
+
 on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
+    inputs:
+      all_platforms:
+        description: 'Also test on macOS'
+        type: boolean
+        default: false
 
 concurrency:
-  group: ci-${{ github.ref }}
+  # By event too, so an on-demand all-platform run never cancels the push run.
+  group: ci-${{ github.ref }}-${{ github.event_name }}
   cancel-in-progress: true
 
 env:
@@ -20,9 +33,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        os: ${{ fromJSON(inputs.all_platforms && '["ubuntu-latest", "windows-latest", "macos-latest"]' || '["ubuntu-latest", "windows-latest"]') }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -36,9 +49,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        os: ${{ fromJSON(inputs.all_platforms && '["ubuntu-latest", "windows-latest", "macos-latest"]' || '["ubuntu-latest", "windows-latest"]') }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Install Xvfb (the X11 docking tests need a display)
@@ -50,12 +63,18 @@ jobs:
       - name: Test
         if: runner.os != 'Linux'
         run: cargo test --workspace
+      # The AppBar tests dock a real window against the real Explorer. They
+      # ran above too; this shows their output, so the log says whether they
+      # RAN or were SKIPPED (no shell in the session) and what they saw.
+      - name: Windows AppBar against the real shell
+        if: runner.os == 'Windows'
+        run: cargo test -p buildrail-platform --test windows_appbar -- --nocapture --test-threads=1
 
   coverage:
     name: Coverage
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: llvm-tools-preview
@@ -65,16 +84,52 @@ jobs:
       # The gate is deliberately below the current figure so that a small
       # refactor does not fail the build, but a real drop does.
       - run: xvfb-run -a cargo llvm-cov --workspace --lcov --output-path lcov.info --fail-under-lines 90
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: lcov
           path: lcov.info
+
+  release-tooling:
+    name: Release tooling
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0 # the tags, so the next version can be worked out
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # The Release button reads CHANGELOG.md to number and describe a
+      # release; a malformed one is caught here rather than when it is pressed.
+      - run: cargo run --locked -p xtask -- changelog check
+      # The release command's own tests run with the rest of the workspace
+      # in the Test jobs. This says what pressing Release now would do.
+      - name: What the next release would be
+        run: |
+          if cargo run --quiet --locked -p xtask -- release --dry-run 2> "$RUNNER_TEMP/plan.txt"; then
+            { echo "### If released now"; echo; head -1 "$RUNNER_TEMP/plan.txt"; } >> "$GITHUB_STEP_SUMMARY"
+          fi
+          cat "$RUNNER_TEMP/plan.txt"
+
+  workflows:
+    name: Workflows and scripts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      # actionlint checks every workflow (and, through shellcheck, which the
+      # runner has, every run: script), so a mistake in the release
+      # workflow is caught in the pull request and not on release day.
+      - name: Lint the workflows
+        run: |
+          bash <(curl -fsSL https://raw.githubusercontent.com/rhysd/actionlint/v1.7.12/scripts/download-actionlint.bash) 1.7.12
+          ./actionlint -color
+      - name: Check the install script
+        run: shellcheck scripts/install.sh
 
   msrv:
     name: Minimum supported Rust (1.95)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.95
       - uses: Swatinem/rust-cache@v2
       - run: cargo check --workspace --all-targets

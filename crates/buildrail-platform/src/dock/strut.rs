@@ -12,9 +12,11 @@
 //! correctly when the strip's monitor reaches the bottom of the X screen.
 //! On a monitor that sits higher than its neighbour, the strut also covers
 //! the empty root area below that monitor; Mutter and KWin discard struts
-//! that do not touch a monitor edge, others may reserve too much.
+//! that do not touch a monitor edge, others may reserve too much. A top
+//! strut has the same caveat mirrored: it is measured from the top of the
+//! root window.
 
-use crate::geometry::PhysicalRect;
+use crate::geometry::{Edge, PhysicalRect};
 
 /// The twelve values of `_NET_WM_STRUT_PARTIAL`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -94,9 +96,87 @@ pub fn bottom_strut(
     })
 }
 
+/// The strut reserving `strip` at the top of an X screen `screen_width`
+/// by `screen_height` pixels: everything from the top of the root window
+/// down to the strip's bottom edge, over the strip's columns.
+///
+/// Returns `None` when the strip is empty or not inside the screen.
+pub fn top_strut(
+    screen_width: u32,
+    screen_height: u32,
+    strip: &PhysicalRect,
+) -> Option<StrutPartial> {
+    let screen = PhysicalRect::new(0, 0, screen_width, screen_height);
+    if strip.is_empty() || !screen.contains_rect(strip) {
+        return None;
+    }
+    let bottom = u32::try_from(strip.bottom()).ok()?;
+    let start_x = u32::try_from(strip.x).ok()?;
+    Some(StrutPartial {
+        top: bottom,
+        top_start_x: start_x,
+        top_end_x: start_x + strip.width - 1,
+        ..StrutPartial::default()
+    })
+}
+
+/// The strut reserving `strip` on `edge` ([`top_strut`] or
+/// [`bottom_strut`]).
+pub fn edge_strut(
+    edge: Edge,
+    screen_width: u32,
+    screen_height: u32,
+    strip: &PhysicalRect,
+) -> Option<StrutPartial> {
+    match edge {
+        Edge::Top => top_strut(screen_width, screen_height, strip),
+        Edge::Bottom => bottom_strut(screen_width, screen_height, strip),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn single_monitor_top_strut() {
+        let strip = PhysicalRect::new(0, 0, 1920, 24);
+        let strut = top_strut(1920, 1080, &strip).unwrap();
+        assert_eq!(
+            strut.to_cardinals(),
+            [0, 0, 24, 0, 0, 0, 0, 0, 0, 1919, 0, 0]
+        );
+        assert_eq!(strut.to_legacy_cardinals(), [0, 0, 24, 0]);
+        assert_eq!(edge_strut(Edge::Top, 1920, 1080, &strip), Some(strut));
+    }
+
+    #[test]
+    fn top_strut_below_a_top_panel_and_on_the_right_monitor() {
+        // A 32 px top panel: the strip sits under it, the strut covers both.
+        let strip = PhysicalRect::new(1920, 32, 1920, 36);
+        let strut = top_strut(3840, 1080, &strip).unwrap();
+        assert_eq!(strut.top, 68);
+        assert_eq!((strut.top_start_x, strut.top_end_x), (1920, 3839));
+        assert_eq!(strut.bottom, 0);
+    }
+
+    #[test]
+    fn top_strut_rejects_rects_outside_the_root() {
+        assert_eq!(
+            top_strut(1920, 1080, &PhysicalRect::new(0, -1, 10, 24)),
+            None
+        );
+        assert_eq!(top_strut(1920, 1080, &PhysicalRect::new(0, 0, 0, 24)), None);
+        assert_eq!(
+            edge_strut(
+                Edge::Bottom,
+                1920,
+                1080,
+                &PhysicalRect::new(0, 1056, 1920, 24)
+            ),
+            bottom_strut(1920, 1080, &PhysicalRect::new(0, 1056, 1920, 24))
+        );
+    }
 
     #[test]
     fn single_monitor_bottom_strut() {

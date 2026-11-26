@@ -329,6 +329,22 @@ impl Tokens {
         }
     }
 
+    /// Accent words on `accent-soft` (the strip's Update chip): the accent
+    /// moved toward `text` until it reads at AA on that ground, hovered or
+    /// not.
+    pub fn accent_ink(&self) -> Color32 {
+        if self.dark {
+            mix(self.accent, self.text, 0.7)
+        } else {
+            mix(self.accent, self.text, 0.8)
+        }
+    }
+
+    /// `accent-soft` under the pointer: 10 % toward `accent`.
+    pub fn accent_soft_hover(&self) -> Color32 {
+        mix(self.accent_soft, self.accent, 0.9)
+    }
+
     /// A primary button under the pointer: `accent` 12 % toward black (the
     /// light theme's `text`, the darkest token).
     pub fn accent_hover(&self) -> Color32 {
@@ -670,6 +686,31 @@ mod tests {
             if !tokens.dark {
                 assert!(contrast_ratio(tokens.accent_text, tokens.accent) >= AA);
             }
+        }
+    }
+
+    #[test]
+    fn the_update_chip_reads_at_aa_and_its_ring_shows() {
+        for tokens in [DARK, LIGHT] {
+            for (ground, bg) in [
+                ("accent-soft", tokens.accent_soft),
+                ("accent-soft hover", tokens.accent_soft_hover()),
+            ] {
+                let ratio = contrast_ratio(tokens.accent_ink(), bg);
+                assert!(
+                    ratio >= AA,
+                    "{} chip words on {ground}: {ratio:.2}",
+                    name(&tokens)
+                );
+                let ring = contrast_ratio(tokens.accent, bg);
+                assert!(
+                    ring >= NON_TEXT,
+                    "{} chip ring on {ground}: {ring:.2}",
+                    name(&tokens)
+                );
+            }
+            // The chip itself stands out from the strip.
+            assert_ne!(tokens.accent_soft, tokens.bg);
         }
     }
 

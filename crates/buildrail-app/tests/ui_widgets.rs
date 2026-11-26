@@ -15,6 +15,7 @@ use buildrail_app::ui::widgets::{
     ButtonKind, CardAction, Choice, ConnectorCard, DisplayTile, NavItem, TextField, Tone,
 };
 use buildrail_app::ui::Tokens;
+use buildrail_platform::geometry::Edge;
 use eframe::egui::accesskit::{Role, Toggled};
 use eframe::egui::{self, Key};
 use egui_kittest::kittest::{NodeT, Queryable};
@@ -152,8 +153,11 @@ fn draw(ui: &mut egui::Ui, s: &mut State) {
                 height: 1920,
             },
         ];
-        if let Some(i) = display_picker(ui, &t, &tiles, Some(0)) {
+        if let Some(i) = display_picker(ui, &t, &tiles, Some(0), Edge::Bottom) {
             clicks.push(format!("display {i}"));
+        }
+        if let Some(i) = display_picker(ui, &t, &tiles[..1], Some(0), Edge::Top) {
+            clicks.push(format!("top display {i}"));
         }
         toast(ui, &t, Tone::Info, "Profile copied.");
         toast(ui, &t, Tone::Success, "Saved.");

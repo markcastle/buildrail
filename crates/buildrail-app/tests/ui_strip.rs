@@ -355,3 +355,202 @@ fn strip_lays_out_in_24_px_and_renders() {
     };
     save_png(&image, &out);
 }
+
+// ---------------------------------------------------------------- frames
+
+/// The delay the strip's last frame asked egui for.
+fn requested_delay(h: &Harness<'_, BuildRailUi>) -> std::time::Duration {
+    h.output()
+        .viewport_output
+        .get(&eframe::egui::ViewportId::ROOT)
+        .map_or(std::time::Duration::MAX, |v| v.repaint_delay)
+}
+
+#[test]
+fn idle_strip_paints_only_when_its_words_change() {
+    use std::time::Duration;
+
+    use buildrail_app::presentation::repaint::CHANGE_SLACK;
+    use buildrail_app::presentation::RepaintPlanner;
+    use buildrail_core::ports::Clock;
+
+    let f = three_builds();
+    let mut h = f.harness([900.0, 24.0]);
+    wait_all_loaded(&mut h);
+    // Settled: Keevoro's run is 2 minutes old, Site's 30. The earliest
+    // change of words is Keevoro's "2 minutes ago" becoming "3 minutes
+    // ago", 60 s from now; nothing is asked for before that.
+    h.step();
+    assert_eq!(
+        h.state().next_repaint(),
+        Some(Duration::from_secs(60) + CHANGE_SLACK)
+    );
+    assert!(
+        requested_delay(&h) >= Duration::from_secs(60),
+        "{:?}",
+        requested_delay(&h)
+    );
+
+    // Simulate ten idle minutes, painting only when asked.
+    let start = f.world.clock.now();
+    let frames_before = h.state().frame_counter().total();
+    let mut frames = 0;
+    while f.world.clock.now() - start < chrono::TimeDelta::minutes(10) {
+        let now = f.world.clock.now();
+        let model = h.state().controller().strip();
+        let next_change = RepaintPlanner::next_text_change(&model, now).unwrap();
+        let delay = h.state().next_repaint().unwrap();
+        let until_change = (next_change - now).to_std().unwrap();
+        assert!(
+            delay >= until_change,
+            "asked for a frame after {delay:?}, but the words only change after {until_change:?}"
+        );
+        assert!(requested_delay(&h) >= until_change);
+        f.world
+            .clock
+            .advance(chrono::TimeDelta::from_std(delay).unwrap());
+        h.step();
+        frames += 1;
+    }
+    // One frame per minute (Keevoro's age); Site's age changes on the
+    // same minute boundaries.
+    assert_eq!(frames, 10);
+    assert_eq!(h.state().frame_counter().total() - frames_before, 10);
+    assert!(h
+        .query_by_label_contains(
+            "Keevoro, GitHub, Failed, branch main, commit a7c412e, 12 minutes ago"
+        )
+        .is_some());
+}
+
+#[test]
+fn a_visible_snapshot_change_asks_for_exactly_one_repaint() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    let f = three_builds();
+    let mut h = f.harness([900.0, 24.0]);
+    wait_all_loaded(&mut h);
+    let repaints = Arc::new(AtomicUsize::new(0));
+    let count = repaints.clone();
+    h.state().controller().set_repaint(Arc::new(move || {
+        count.fetch_add(1, Ordering::SeqCst);
+    }));
+
+    // Refreshes that only confirm what is shown (the clock moves, so "last
+    // confirmed" moves too) ask for nothing.
+    for _ in 0..5 {
+        f.world.clock.advance(TimeDelta::seconds(1));
+        h.state().controller().refresh_now();
+        std::thread::sleep(Duration::from_millis(60));
+    }
+    assert_eq!(repaints.load(Ordering::SeqCst), 0);
+
+    // Keevoro is rerun: one repaint, however many refreshes follow.
+    f.world.github.set(
+        "keevoro",
+        Ok(vec![record("7", 2, BuildStatus::Running, 0, "keevoro")]),
+    );
+    h.state().controller().refresh_now();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while repaints.load(Ordering::SeqCst) == 0 {
+        assert!(Instant::now() < deadline, "no repaint for the change");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    for _ in 0..5 {
+        h.state().controller().refresh_now();
+        std::thread::sleep(Duration::from_millis(60));
+    }
+    assert_eq!(repaints.load(Ordering::SeqCst), 1);
+    h.step();
+    assert!(h
+        .query_by_label_contains("Keevoro, GitHub, Building")
+        .is_some());
+}
+
+#[test]
+fn building_glyph_is_still_unless_animation_is_on_and_the_strip_is_visible() {
+    use std::time::Duration;
+
+    use buildrail_app::presentation::repaint::ANIMATION_STEP;
+
+    let f = Fixture::with_profile(&[gh("Keevoro", "keevoro")]);
+    f.world.github.set(
+        "keevoro",
+        Ok(vec![record("7", 1, BuildStatus::Running, 0, "keevoro")]),
+    );
+    let mut h = f.harness([900.0, 24.0]);
+    step_until(&mut h, "building", |h| {
+        h.query_by_label_contains("Keevoro, GitHub, Building")
+            .is_some()
+    });
+    // Default: still; the next frame is when "just now" becomes "1 min ago".
+    h.step();
+    assert!(h.state().next_repaint().unwrap() >= Duration::from_secs(59));
+    let still = h.render().unwrap();
+
+    h.state_mut().set_animate(true);
+    h.state_mut()
+        .controller_mut()
+        .update_prefs(|p| p.animation = true)
+        .unwrap();
+    h.step();
+    assert_eq!(h.state().next_repaint(), Some(ANIMATION_STEP));
+    assert!(requested_delay(&h) <= ANIMATION_STEP);
+
+    // Hidden for a fullscreen app, or the desktop asks for less motion:
+    // still again.
+    h.state_mut().set_strip_visible(false);
+    h.step();
+    assert!(h.state().next_repaint().unwrap() >= Duration::from_secs(59));
+    h.state_mut().set_strip_visible(true);
+    h.state_mut().set_reduced_motion(true);
+    h.step();
+    assert!(h.state().next_repaint().unwrap() >= Duration::from_secs(59));
+    assert_eq!(h.render().unwrap(), still, "at rest, the glyph is the same");
+}
+
+/// The strip's 1 px line faces the desktop: along its top edge when it
+/// sits at the bottom of the screen (or floats), along its bottom edge when
+/// it is docked at the top.
+#[test]
+fn the_edge_line_faces_the_desktop() {
+    use buildrail_app::presentation::StripSide;
+    use buildrail_app::ui::Tokens;
+
+    let tokens = Tokens::for_theme(buildrail_profile::Theme::Dark, None);
+    let distance = |p: &image::Rgba<u8>, c: eframe::egui::Color32| {
+        (i32::from(p[0]) - i32::from(c.r())).abs()
+            + (i32::from(p[1]) - i32::from(c.g())).abs()
+            + (i32::from(p[2]) - i32::from(c.b())).abs()
+    };
+    for (side, line_row, ground_row) in [
+        (StripSide::Bottom, 0, 23),
+        (StripSide::Floating, 0, 23),
+        (StripSide::Top, 23, 0),
+    ] {
+        let f = Fixture::new();
+        let mut app = demo_ui(&f, buildrail_profile::Theme::Dark);
+        app.set_strip_surroundings(side, Vec::new());
+        assert_eq!(app.strip_view().side(), side);
+        let mut h = Harness::builder()
+            .with_size([400.0, 24.0])
+            .with_pixels_per_point(1.0)
+            .renderer(CpuRenderer::default())
+            .build_ui_state(root_ui, app);
+        for _ in 0..4 {
+            h.step();
+        }
+        let image = h.render().unwrap();
+        // Right of the caption rule and the first entry's start: plain ground.
+        let x = 395;
+        let line = image.get_pixel(x, line_row);
+        let ground = image.get_pixel(x, ground_row);
+        assert!(
+            distance(line, tokens.line) < distance(ground, tokens.line),
+            "{side:?}: row {line_row} {line:?} should be the line, row {ground_row} {ground:?} the ground"
+        );
+        assert!(distance(ground, tokens.bg) <= 6, "{side:?}: {ground:?}");
+    }
+}

@@ -30,10 +30,20 @@
 //!   the profile, the device preferences and the refresh engine handle,
 //!   and executes commands (async work on tokio, results over a channel).
 //! * [`shell`] – [`shell::DockController`]: dock or float, hide for
-//!   fullscreen apps, remember the floating position. Toolkit neutral.
+//!   fullscreen apps, remember the floating position. Toolkit neutral; run
+//!   on its own thread by [`shell::ShellWorker`] so polling never paints.
 //! * [`ui`] – the egui widgets and the thin eframe glue.
 //! * [`fakes`] / [`demo`] – in-memory providers for tests and `--demo`.
+//! * [`dialogs`] – the system open/save dialogs (`rfd`).
 //! * [`compose`] – the only place that names concrete adapters.
+//!
+//! ## Frames
+//!
+//! An idle strip paints no frames. It paints when the controller reports
+//! a visible change, when the shell thread moves, hides or shows it, on
+//! input, and when [`presentation::RepaintPlanner`] says the words on the
+//! strip next change ("2 min ago" → "3 min ago"). The in-progress glyph
+//! is still unless the Animation preference is on.
 //!
 //! Everything except `ui::window` and `compose::run` is exercised by tests
 //! without a real window; the UI itself is tested with `egui_kittest`.
@@ -41,6 +51,7 @@
 pub mod app;
 pub mod compose;
 pub mod demo;
+pub mod dialogs;
 pub mod fakes;
 pub mod presentation;
 pub mod settings;

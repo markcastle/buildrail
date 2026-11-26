@@ -8,6 +8,7 @@
 //! for the provider side.
 
 use std::collections::{HashMap, VecDeque};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use async_trait::async_trait;
@@ -16,14 +17,18 @@ use buildrail_core::ports::{Clock, ProviderError, RunSource, Secret};
 use buildrail_core::refresh::SourceRegistry;
 use buildrail_platform::autostart::InMemoryAutostart;
 use buildrail_platform::credentials::InMemoryCredentialStore;
+use buildrail_platform::folders::RecordingFolderOpener;
 use buildrail_platform::url_opener::RecordingUrlOpener;
 use buildrail_profile::AppPaths;
 
-use crate::app::{Catalogs, Services};
+use crate::app::{Catalogs, FileDialog, Services, UpdateService};
 use buildrail_providers::catalog::{
     CloudflareAccount, CloudflareAccounts, CloudflareTokenCheck, CloudflareTokenStatus,
     CloudflareWorker, CloudflareWorkers, GitHubBranch, GitHubBranches, GitHubIdentity,
     GitHubRepositories, GitHubRepository, GitHubUser, GitHubWorkflow, GitHubWorkflows,
+};
+use buildrail_update::{
+    CheckError, FetchError, InstallError, RestartError, Update, UpdateStatus, Version,
 };
 use chrono::{DateTime, TimeDelta, Utc};
 
@@ -325,6 +330,168 @@ impl CloudflareWorkers for FakeCatalog {
     }
 }
 
+/// Open and save dialogs that answer from a script: each call takes the
+/// next queued answer (`None` = the person cancelled), and cancels once
+/// the script runs out. Records what was asked.
+#[derive(Debug, Default)]
+pub struct ScriptedFileDialog {
+    answers: Mutex<VecDeque<Option<PathBuf>>>,
+    asked: Mutex<Vec<String>>,
+}
+
+impl ScriptedFileDialog {
+    /// Cancels every dialog.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Queues the answer to the next dialog.
+    pub fn answer(&self, path: Option<PathBuf>) {
+        lock(&self.answers).push_back(path);
+    }
+
+    /// What was asked so far: `"open"`, or `"save <suggested name>"`.
+    pub fn asked(&self) -> Vec<String> {
+        lock(&self.asked).clone()
+    }
+
+    fn next(&self, what: String) -> Option<PathBuf> {
+        lock(&self.asked).push(what);
+        lock(&self.answers).pop_front().flatten()
+    }
+}
+
+impl FileDialog for ScriptedFileDialog {
+    fn open_profile(&self) -> Option<PathBuf> {
+        self.next("open".to_owned())
+    }
+
+    fn save_profile(&self, suggested_name: &str) -> Option<PathBuf> {
+        self.next(format!("save {suggested_name}"))
+    }
+}
+
+/// An [`UpdateService`] answering from a script, recording every call in
+/// order (`"check"`, `"install 0.3.0"`, `"restart"`, and anything a test
+/// adds with [`note`](Self::note)) so tests can check the order of a
+/// whole install.
+#[derive(Debug)]
+pub struct ScriptedUpdateService {
+    version: Version,
+    answer: Mutex<UpdateStatus>,
+    install: Mutex<Result<(), InstallError>>,
+    install_delay: Mutex<std::time::Duration>,
+    restart: Mutex<Result<(), RestartError>>,
+    calls: Mutex<Vec<String>>,
+}
+
+impl ScriptedUpdateService {
+    /// Running `version`, every check answering `answer`; installs and
+    /// restarts succeed.
+    pub fn new(version: &str, answer: UpdateStatus) -> Self {
+        Self {
+            version: Version::parse(version).unwrap_or_else(|_| Version::new(0, 0, 0)),
+            answer: Mutex::new(answer),
+            install: Mutex::new(Ok(())),
+            install_delay: Mutex::new(std::time::Duration::ZERO),
+            restart: Mutex::new(Ok(())),
+            calls: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Running `version`, which is the latest.
+    pub fn up_to_date(version: &str) -> Self {
+        let current = Version::parse(version).unwrap_or_else(|_| Version::new(0, 0, 0));
+        Self::new(version, UpdateStatus::UpToDate { current })
+    }
+
+    /// A build that does not update itself (the `--demo` service).
+    pub fn not_configured(version: &str) -> Self {
+        Self::new(version, UpdateStatus::NotConfigured)
+    }
+
+    /// "BuildRail `version` is available." with a release page under the
+    /// repository.
+    pub fn available(version: &str) -> UpdateStatus {
+        let parsed = Version::parse(version).unwrap_or_else(|_| Version::new(0, 0, 0));
+        UpdateStatus::Available(buildrail_update::testing::update(
+            parsed,
+            format!("https://github.com/markcastle/buildrail/releases/tag/v{version}"),
+        ))
+    }
+
+    /// "Update check failed: the server answered HTTP 503."
+    pub fn failed() -> UpdateStatus {
+        UpdateStatus::Failed(CheckError::Fetch(FetchError::Status(503)))
+    }
+
+    /// Answers every following check with `status`.
+    pub fn answer(&self, status: UpdateStatus) {
+        *lock(&self.answer) = status;
+    }
+
+    /// Makes installs fail with `error`.
+    pub fn fail_install(&self, error: InstallError) {
+        *lock(&self.install) = Err(error);
+    }
+
+    /// Makes installs succeed again.
+    pub fn install_succeeds(&self) {
+        *lock(&self.install) = Ok(());
+    }
+
+    /// Makes installs take `delay` (tokio time) before answering.
+    pub fn delay_install(&self, delay: std::time::Duration) {
+        *lock(&self.install_delay) = delay;
+    }
+
+    /// Makes restarts fail.
+    pub fn fail_restart(&self, why: &str) {
+        *lock(&self.restart) = Err(RestartError(why.to_owned()));
+    }
+
+    /// Records `what` among the calls (for ordering checks).
+    pub fn note(&self, what: &str) {
+        lock(&self.calls).push(what.to_owned());
+    }
+
+    /// Every call so far, in order.
+    pub fn calls(&self) -> Vec<String> {
+        lock(&self.calls).clone()
+    }
+
+    /// How many checks were made.
+    pub fn checks(&self) -> usize {
+        lock(&self.calls).iter().filter(|c| *c == "check").count()
+    }
+}
+
+#[async_trait]
+impl UpdateService for ScriptedUpdateService {
+    fn current_version(&self) -> Version {
+        self.version.clone()
+    }
+
+    async fn check(&self) -> UpdateStatus {
+        self.note("check");
+        lock(&self.answer).clone()
+    }
+
+    async fn install(&self, update: &Update) -> Result<(), InstallError> {
+        self.note(&format!("install {}", update.version));
+        let delay = *lock(&self.install_delay);
+        if !delay.is_zero() {
+            tokio::time::sleep(delay).await;
+        }
+        lock(&self.install).clone()
+    }
+
+    fn restart(&self) -> Result<(), RestartError> {
+        self.note("restart");
+        lock(&self.restart).clone()
+    }
+}
+
 /// Every port faked, with handles kept so a test can script providers,
 /// inspect stored credentials and opened URLs, and move the clock.
 #[derive(Clone)]
@@ -343,6 +510,12 @@ pub struct FakeWorld {
     pub urls: Arc<RecordingUrlOpener>,
     /// Launch-at-login.
     pub autostart: Arc<InMemoryAutostart>,
+    /// Open and save dialogs.
+    pub dialogs: Arc<ScriptedFileDialog>,
+    /// Records opened folders.
+    pub folders: Arc<RecordingFolderOpener>,
+    /// The update service (up to date unless scripted otherwise).
+    pub updates: Arc<ScriptedUpdateService>,
 }
 
 impl FakeWorld {
@@ -357,6 +530,9 @@ impl FakeWorld {
             clock: Arc::new(ManualClock::new(now)),
             urls: Arc::new(RecordingUrlOpener::new()),
             autostart: Arc::new(InMemoryAutostart::new(false)),
+            dialogs: Arc::new(ScriptedFileDialog::new()),
+            folders: Arc::new(RecordingFolderOpener::new()),
+            updates: Arc::new(ScriptedUpdateService::up_to_date(env!("CARGO_PKG_VERSION"))),
         }
     }
 
@@ -374,6 +550,10 @@ impl FakeWorld {
             autostart: Some(self.autostart.clone()),
             profile_store: paths.profile_store(),
             prefs_store: paths.device_prefs_store(),
+            dialogs: self.dialogs.clone(),
+            folders: self.folders.clone(),
+            logs_dir: Some(paths.logs_dir().to_owned()),
+            updates: self.updates.clone(),
         }
     }
 }

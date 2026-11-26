@@ -1,103 +1,620 @@
 name: Release
 
-# Builds the Windows executable.
+# The Release button: Actions → Release → Run workflow, on main, press Run.
 #
-# * Push a tag like `v0.1.0`  -> builds, then publishes a GitHub release with
-#   the zip attached.
-# * "Run workflow" button     -> builds only; download the zip from the run's
-#   artifacts. Handy for trying a build without cutting a release.
-# * A pull request that edits this file -> builds only, so changes to the
-#   workflow are tested before they are merged.
+# Leave the version blank and the changelog decides it: a minor release if
+# anything under Unreleased is Added or Removed, otherwise a patch. Type a
+# version to choose yourself (that is how 1.0.0 happens). Tick "Rehearse" to
+# see exactly what would happen without pushing, building or publishing
+# anything; a rehearsal can run from any branch.
+#
+# Platforms: every release is built for Windows. macOS (Apple silicon and
+# Intel) and Linux are built only when "Also build macOS and Linux" is
+# ticked, which is meant for major releases while BuildRail is moving fast.
+# Installed macOS and Linux copies treat a release without their build as
+# "Up to date", and the one-line installers fall back to the newest release
+# that has one.
+#
+# The jobs:
+#
+#   macos-tests   only with all platforms: the test suite on macOS, which
+#             per-commit CI does not run, BEFORE anything is tagged.
+#   prepare   decides and checks the version, checks CI passed on this
+#             commit, checks the update signing key, cuts the release with
+#             `cargo run -p xtask -- release` (the same command a person can
+#             run), pushes the commit and tag, and creates the GitHub release
+#             as a DRAFT straight away.
+#   build     one runner per platform; each checks out the tag, builds, and
+#             uploads a download and an update payload to the draft.
+#   publish   only after every build succeeded: signs latest.json, writes
+#             SHA256SUMS.txt, checks every expected file is on the draft and
+#             matches its checksum, and only then publishes it as "latest".
+#
+# There is deliberately NO trigger on pushing a tag. Tags made by hand, and
+# versions set by hand to match them, are how releases went wrong before:
+# the only way a release is cut is this button (or the Roll back workflow,
+# which calls it), so the tag, Cargo.toml, Cargo.lock and the changelog are
+# always set together by one command. A tag pushed by hand builds nothing.
+#
+# The builds run in this same workflow, after the push, because a tag pushed
+# with the workflow's own token does not start other workflows.
+#
+# Step by step, and every trap this design avoids: docs/releasing.md.
+
 on:
-  push:
-    tags: ["v*"]
   workflow_dispatch:
-  pull_request:
-    paths:
-      - .github/workflows/release.yml
+    inputs:
+      version:
+        description: 'Leave blank and the changelog decides (minor if anything was Added or Removed, otherwise a patch). Or type a version such as 1.0.0.'
+        required: false
+        type: string
+      dry_run:
+        description: 'Rehearse: do everything except push, build and publish'
+        type: boolean
+        default: false
+      all_platforms:
+        description: 'Also build macOS and Linux (for major releases)'
+        type: boolean
+        default: false
+      rotate_key:
+        description: 'I replaced the update signing key on purpose (copies already installed will have to be reinstalled by hand)'
+        type: boolean
+        default: false
+  workflow_call:
+    inputs:
+      version:
+        required: true
+        type: string
+      skip_ci_check:
+        description: 'The tree being released was released before, so CI need not have run on this commit'
+        type: boolean
+        default: false
+      commit:
+        description: 'The commit to release, when it is newer than the one the calling workflow started on'
+        type: string
+        default: ''
+      all_platforms:
+        description: 'Also build macOS and Linux'
+        type: boolean
+        default: false
 
 permissions:
-  contents: read
+  contents: write # push the release commit and tag, create and publish the release
+  actions: read # read CI's result for this commit
+
+# One release at a time, and never cancel one that has started.
+concurrency:
+  group: release
+  cancel-in-progress: false
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  windows:
-    name: Windows x64 exe
-    runs-on: windows-latest
-    outputs:
-      asset: ${{ steps.package.outputs.asset }}
+  # Per-commit CI tests on Windows and Linux only. A release that also
+  # builds for macOS runs the test suite there first, and prepare waits for
+  # it, so a macOS failure stops the release before anything is pushed or
+  # tagged: nothing is left half done, not even a draft. Requiring a
+  # full-platform CI run on the commit instead would make every major
+  # release a two-step chore for the same assurance. Linux needs no extra
+  # run: per-commit CI already tests it.
+  macos-tests:
+    name: Test on macOS
+    if: ${{ inputs.all_platforms }}
+    runs-on: macos-latest
+    timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.commit || github.sha }}
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace --locked
 
-      - name: Check the tag matches the crate version
-        if: startsWith(github.ref, 'refs/tags/v')
-        shell: bash
+  prepare:
+    name: Prepare ${{ inputs.version || 'the next version' }}${{ inputs.dry_run && ' (rehearsal)' || '' }}
+    needs: macos-tests
+    # Runs when the macOS tests passed or were not needed (skipped).
+    if: ${{ !failure() && !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      targets: ${{ steps.platforms.outputs.targets }}
+      matrix: ${{ steps.platforms.outputs.matrix }}
+      version: ${{ steps.cut.outputs.version }}
+      signed: ${{ steps.signing.outputs.signed }}
+      public_key: ${{ steps.signing.outputs.public_key }}
+      key_id: ${{ steps.signing.outputs.key_id }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # A roll back releases the commit it has just pushed, which is newer
+          # than the one this run started on.
+          ref: ${{ inputs.commit || github.sha }}
+          fetch-depth: 0
+
+      - name: Check where this is released from
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+          DRY_RUN: ${{ inputs.dry_run }}
         run: |
-          version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "buildrail-app") | .version')
-          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
-            echo "::error::Tag $GITHUB_REF_NAME does not match the version in Cargo.toml ($version). Bump [workspace.package] version, or tag v$version."
+          if [ "$GITHUB_REF" != "refs/heads/main" ] && [ "$DRY_RUN" != "true" ]; then
+            echo "::error::Releases are cut from main, not from $GITHUB_REF_NAME. Pick main under \"Use workflow from\", or tick Rehearse to try this branch."
+            exit 1
+          fi
+          if [ -n "$INPUT_VERSION" ] && ! [[ "$INPUT_VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "::error::\"$INPUT_VERSION\" is not a version. Use major.minor.patch, such as 0.3.0, or leave it blank."
             exit 1
           fi
 
-      - name: Build
-        run: cargo build --release --locked -p buildrail-app
-
-      - name: Package
-        id: package
-        shell: bash
+      # Windows always; macOS and Linux only when asked. Everything after
+      # this (the build matrix, the payloads signed into latest.json, the
+      # checksums and the files publish insists on) follows this one list.
+      - name: Choose the platforms
+        id: platforms
+        env:
+          ALL_PLATFORMS: ${{ inputs.all_platforms }}
         run: |
-          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
-            name="buildrail-$GITHUB_REF_NAME-windows-x64"
+          # Intel Macs are built on the Apple silicon runner, which builds
+          # for both. Linux is built on the oldest supported Ubuntu, so the
+          # binary needs only glibc 2.35 and runs on more distributions.
+          all='[
+            {"target": "windows-x86_64", "os": "windows-latest", "triple": "x86_64-pc-windows-msvc", "label": "Windows"},
+            {"target": "macos-aarch64", "os": "macos-latest", "triple": "aarch64-apple-darwin", "label": "macOS (Apple silicon)"},
+            {"target": "macos-x86_64", "os": "macos-latest", "triple": "x86_64-apple-darwin", "label": "macOS (Intel)"},
+            {"target": "linux-x86_64", "os": "ubuntu-22.04", "triple": "x86_64-unknown-linux-gnu", "label": "Linux"}
+          ]'
+          if [ "$ALL_PLATFORMS" = "true" ]; then
+            chosen=$(jq -c '.' <<< "$all")
           else
-            name="buildrail-${GITHUB_SHA::7}-windows-x64"
+            chosen=$(jq -c 'map(select(.target == "windows-x86_64"))' <<< "$all")
           fi
-          mkdir "$name"
-          cp target/release/buildrail.exe README.md "$name/"
-          # Double-click helper: the real strip against made-up builds, with
-          # no tokens, network or setup.
-          printf '@echo off\r\nstart "" "%%~dp0buildrail.exe" --demo\r\n' > "$name/Try the demo.cmd"
-          7z a "$name.zip" "$name" > /dev/null
-          sha256sum "$name.zip" > "$name.zip.sha256"
-          echo "asset=$name" >> "$GITHUB_OUTPUT"
-          ls -l "$name" "$name.zip"
+          {
+            echo "targets=$(jq -r 'map(.target) | join(" ")' <<< "$chosen")"
+            echo "matrix=$(jq -c '{include: .}' <<< "$chosen")"
+          } >> "$GITHUB_OUTPUT"
+          labels=$(jq -r 'map(.label) | join(", ")' <<< "$chosen")
+          echo "Platforms: $labels"
+          {
+            echo "**Platforms:** $labels."
+            if [ "$ALL_PLATFORMS" != "true" ]; then
+              echo
+              echo "macOS and Linux are built only when \"Also build macOS and Linux\" is ticked, for major releases. Copies already installed there stay on their version and say \"Up to date\"."
+            fi
+            echo
+          } >> "$GITHUB_STEP_SUMMARY"
 
-      - uses: actions/upload-artifact@v4
-        with:
-          name: ${{ steps.package.outputs.asset }}
-          path: |
-            ${{ steps.package.outputs.asset }}.zip
-            ${{ steps.package.outputs.asset }}.zip.sha256
-          if-no-files-found: error
+      - uses: dtolnay/rust-toolchain@stable
 
-  publish:
-    name: Publish GitHub release
-    if: startsWith(github.ref, 'refs/tags/v')
-    needs: windows
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/download-artifact@v4
+      - uses: Swatinem/rust-cache@v2
         with:
-          name: ${{ needs.windows.outputs.asset }}
-      - name: Create the release
+          shared-key: release-tools
+
+      # The release command in rehearsal mode: it fetches tags, checks the
+      # changelog, works out the version and refuses one that is not higher
+      # than every tag or is tagged already. It writes version, why and
+      # previous to this step's outputs and changes nothing.
+      # --locked: a Cargo.lock on main that disagrees with Cargo.toml would
+      # otherwise be rewritten here and the cut would refuse a dirty tree.
+      - name: Decide the version
+        id: plan
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          args=(release --dry-run --github-output "$GITHUB_OUTPUT")
+          if [ -n "$INPUT_VERSION" ]; then args+=("$INPUT_VERSION"); fi
+          if ! cargo run --quiet --locked -p xtask -- "${args[@]}" 2> "$RUNNER_TEMP/plan.txt"; then
+            cat "$RUNNER_TEMP/plan.txt"
+            message=$(cat "$RUNNER_TEMP/plan.txt")
+            message="${message//'%'/'%25'}"
+            echo "::error::${message//$'\n'/'%0A'}"
+            exit 1
+          fi
+          cat "$RUNNER_TEMP/plan.txt"
+
+      - name: Write the version on the run's page
+        env:
+          VERSION: ${{ steps.plan.outputs.version }}
+          WHY: ${{ steps.plan.outputs.why }}
+          PREVIOUS: ${{ steps.plan.outputs.previous }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          {
+            if [ "$DRY_RUN" = "true" ]; then echo "## Rehearsal: BuildRail $VERSION"; else echo "## BuildRail $VERSION"; fi
+            echo
+            echo "${PREVIOUS:+After $PREVIOUS, }$WHY."
+            echo
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # The commit being released must have passed CI. Commits the workflow
+      # itself pushes never run CI, so this looks at the commit a person
+      # merged. A roll back skips it: the tree it releases was released
+      # before. A rehearsal reports it without stopping.
+      - name: CI must be green on this commit
+        if: ${{ !inputs.skip_ci_check }}
         env:
           GH_TOKEN: ${{ github.token }}
+          DRY_RUN: ${{ inputs.dry_run }}
         run: |
-          zip="${{ needs.windows.outputs.asset }}.zip"
-          # The tag may have come from `git push` (no release yet) or from the
-          # "Draft a new release" page on GitHub (release already exists).
-          # Handle both: create it if missing, otherwise attach the files.
-          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
-            gh release upload "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --clobber "$zip" "$zip.sha256"
+          sha=$(git rev-parse HEAD)
+          short=${sha:0:7}
+          state=$(gh run list --workflow ci.yml --commit "$sha" --limit 1 --json status,conclusion --jq '.[0] | "\(.status) \(.conclusion)"')
+          case "$state" in
+            "completed success") echo "CI passed on $short."; exit 0 ;;
+            "") problem="CI has not run on $short. Merge to main and wait for CI before releasing." ;;
+            "completed "*) problem="CI did not pass on $short (${state#completed }). Fix main first." ;;
+            *) problem="CI is still running on $short ($state). Wait for it, then press Run again." ;;
+          esac
+          if [ "$DRY_RUN" = "true" ]; then
+            echo "::warning::$problem A real release would stop here."
           else
-            gh release create "$GITHUB_REF_NAME" \
-              --repo "$GITHUB_REPOSITORY" \
-              --title "BuildRail $GITHUB_REF_NAME" \
-              --generate-notes \
-              "$zip" "$zip.sha256"
+            echo "::error::$problem"
+            exit 1
           fi
+
+      # buildrail-sign exits 3 when BUILDRAIL_UPDATE_SIGNING_KEY is not set,
+      # and with another error when it is set but unusable: that must stop
+      # the release, never quietly ship it unsigned.
+      #
+      # Key continuity: every installed copy carries the public key it was
+      # built with. If the last published release was signed with another
+      # key, this release would reach nobody, so it stops unless "I replaced
+      # the update signing key on purpose" was ticked. The same goes for the
+      # secret going missing after releases were signed: the new latest
+      # release would have no latest.json and installed copies would stop
+      # hearing about updates.
+      - name: Check the update signing key
+        id: signing
+        env:
+          BUILDRAIL_UPDATE_SIGNING_KEY: ${{ secrets.BUILDRAIL_UPDATE_SIGNING_KEY }}
+          ROTATE_KEY: ${{ inputs.rotate_key }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set +e
+          public_key=$(cargo run --quiet --locked -p buildrail-sign -- public-key 2> "$RUNNER_TEMP/sign.txt")
+          code=$?
+          set -e
+          case $code in
+            0)
+              key_id=$(cargo run --quiet --locked -p buildrail-sign -- key-id)
+              signed=true
+              echo "Update signing is configured. Key id $key_id." ;;
+            3)
+              signed=false
+              key_id=""
+              echo "BUILDRAIL_UPDATE_SIGNING_KEY is not set; this release will not update itself." ;;
+            *)
+              cat "$RUNNER_TEMP/sign.txt"
+              echo "::error::BUILDRAIL_UPDATE_SIGNING_KEY is set but could not be used: $(head -1 "$RUNNER_TEMP/sign.txt"). It must be the base64 of 32 random bytes on one line; see docs/releasing.md."
+              exit 1 ;;
+          esac
+
+          previous_key=""
+          previous_tag=$(gh release view --json tagName --jq .tagName 2>/dev/null || true)
+          if [ -n "$previous_tag" ] && gh release download "$previous_tag" --pattern latest.json --dir "$RUNNER_TEMP/previous" 2>/dev/null; then
+            previous_key=$(jq -r '.key_id // empty' "$RUNNER_TEMP/previous/latest.json")
+            echo "The latest release, $previous_tag, was signed with key $previous_key."
+          fi
+          if [ -n "$previous_key" ] && [ "$signed" != "true" ]; then
+            echo "::error::$previous_tag was signed for self-update, but BUILDRAIL_UPDATE_SIGNING_KEY is no longer set. Releasing without it would leave every installed copy unable to find updates. Restore the secret from your password manager (docs/releasing.md)."
+            exit 1
+          fi
+          if [ -n "$previous_key" ] && [ "$key_id" != "$previous_key" ]; then
+            if [ "$ROTATE_KEY" != "true" ]; then
+              echo "::error::The signing key has changed: $previous_tag was signed with key $previous_key, this secret is key $key_id. Installed copies would refuse this release and stay where they are. If the secret was replaced by mistake, put the old one back. If you replaced it on purpose, run again with \"I replaced the update signing key on purpose\" ticked."
+              exit 1
+            fi
+            echo "::warning::Key rotated on purpose ($previous_key → $key_id). Copies already installed cannot verify this release; people must install it by hand once."
+            echo "> [!WARNING]
+          > The update signing key changed ($previous_key → $key_id). Copies already installed cannot verify this release, so people must install it by hand once." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          if [ "$signed" = "true" ]; then
+            echo "Update signing: configured, key id \`$key_id\`." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "::warning::This release is not signed, so its builds cannot update themselves. To fix that for future releases, set BUILDRAIL_UPDATE_SIGNING_KEY; see docs/releasing.md."
+            {
+              echo "> [!WARNING]"
+              echo "> **Not signed.** BUILDRAIL_UPDATE_SIGNING_KEY is not set, so this release has no latest.json and its builds cannot update themselves. The one-time setup takes two minutes: docs/releasing.md, \"Set up update signing\"."
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+          {
+            echo "signed=$signed"
+            echo "public_key=$public_key"
+            echo "key_id=$key_id"
+          } >> "$GITHUB_OUTPUT"
+
+      # The same command a person can run in a terminal: it dates the
+      # changelog, sets [workspace.package] version, brings Cargo.lock into
+      # line, commits "Release vX.Y.Z" and makes the tag. In a rehearsal the
+      # commit and tag stay on this runner.
+      - name: Cut the release
+        id: cut
+        env:
+          VERSION: ${{ steps.plan.outputs.version }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          cargo run --quiet --locked -p xtask -- release "$VERSION" --github-output "$GITHUB_OUTPUT"
+          echo
+          git show --stat --format='%h %s' HEAD
+
+      # Both or neither: --atomic never leaves a tag without its commit on
+      # main, or the reverse. If main moved since this run started, the push
+      # is refused; press Run again.
+      - name: Push the commit and the tag
+        if: ${{ !inputs.dry_run }}
+        env:
+          VERSION: ${{ steps.cut.outputs.version }}
+        run: git push --atomic origin HEAD:refs/heads/main "refs/tags/v$VERSION"
+
+      - name: Write the release notes
+        env:
+          VERSION: ${{ steps.cut.outputs.version }}
+          REPO: ${{ github.repository }}
+          ALL_PLATFORMS: ${{ inputs.all_platforms }}
+        run: |
+          notes="$RUNNER_TEMP/release-notes.md"
+          cargo run --quiet --locked -p xtask -- changelog section "$VERSION" > "$notes"
+          cat >> "$notes" <<EOF
+
+          ---
+
+          **Install or update in one line.** Windows, in PowerShell: \`irm https://raw.githubusercontent.com/$REPO/main/scripts/install.ps1 | iex\`. macOS and Linux: \`curl -fsSL https://raw.githubusercontent.com/$REPO/main/scripts/install.sh | sh\`. Or download below: \`SHA256SUMS.txt\` has every file's checksum. Every version's notes are in [CHANGELOG.md](https://github.com/$REPO/blob/v$VERSION/CHANGELOG.md).
+          EOF
+          if [ "$ALL_PLATFORMS" != "true" ]; then
+            printf '\n%s\n' "This release is for Windows. macOS and Linux builds come with major releases; on those systems the line above installs the newest release that has one." >> "$notes"
+          fi
+          cat "$notes"
+          { echo; echo "### Release notes"; echo; cat "$notes"; } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Rehearsal only
+        if: ${{ inputs.dry_run }}
+        env:
+          VERSION: ${{ steps.cut.outputs.version }}
+          TARGETS: ${{ steps.platforms.outputs.targets }}
+        run: |
+          echo "Rehearsal: nothing was pushed, built or published."
+          echo "A real run would push the commit above and the tag v$VERSION, create a draft release, build $TARGETS, and publish."
+          echo "Rehearsal: nothing was pushed, built or published." >> "$GITHUB_STEP_SUMMARY"
+
+      # A draft, created the moment the tag exists. Two reasons. "latest"
+      # must never point at a release with nothing to download. And the
+      # workflow token may only create a release while the tag's commit
+      # matches main's workflow files; created later, after main moved on,
+      # GitHub answers "Resource not accessible by integration".
+      - name: Create the release as a draft
+        if: ${{ !inputs.dry_run }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.cut.outputs.version }}
+        run: |
+          if gh release view "v$VERSION" --json isDraft >/dev/null 2>&1; then
+            echo "Release v$VERSION already exists; the builds will upload to it."
+            exit 0
+          fi
+          if ! gh release create "v$VERSION" --draft --verify-tag --title "BuildRail v$VERSION" --notes-file "$RUNNER_TEMP/release-notes.md"; then
+            echo "::error::GitHub refused to create the draft release v$VERSION. The tag is pushed. Create the draft by hand on the Releases page (tag v$VERSION, title \"BuildRail v$VERSION\", notes from: cargo run -p xtask -- changelog section $VERSION), then re-run the failed jobs."
+            exit 1
+          fi
+          echo "Created the draft release v$VERSION." >> "$GITHUB_STEP_SUMMARY"
+
+  build:
+    name: Build ${{ matrix.target }}
+    needs: prepare
+    # !failure() rather than the default: prepare comes after a job that is
+    # skipped for Windows-only releases, and a skip would otherwise skip
+    # everything after it.
+    if: ${{ !failure() && !cancelled() && !inputs.dry_run }}
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+      TARGET: ${{ matrix.target }}
+      TRIPLE: ${{ matrix.triple }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: refs/tags/v${{ needs.prepare.outputs.version }}
+
+      - name: Check the tag carries this version
+        run: |
+          found=$(awk '/^\[workspace\.package\]/{t=1;next} /^\[/{t=0} t && /^version *=/{gsub(/^version *= *"|".*$/,"");print;exit}' Cargo.toml)
+          if [ "$found" != "$VERSION" ]; then
+            echo "::error::Cargo.toml at v$VERSION says version $found."
+            exit 1
+          fi
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.triple }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.triple }}
+
+      # The app compiles the public key in. Empty means "not configured":
+      # such a build runs normally and never installs an update.
+      - name: Build
+        env:
+          BUILDRAIL_UPDATE_PUBLIC_KEY: ${{ needs.prepare.outputs.public_key }}
+        run: cargo build --release --locked -p buildrail-app --target "$TRIPLE"
+
+      # Apple silicon runs nothing without at least an ad-hoc signature.
+      # The linker signs the binary, but stripping can invalidate that, and
+      # a copy that replaced itself through the updater never passes
+      # through install.sh's own codesign step. So sign (ad hoc) and verify
+      # here, before the binary goes into the download and the update file.
+      - name: Sign the macOS binary (ad hoc)
+        if: runner.os == 'macOS'
+        run: |
+          binary="target/$TRIPLE/release/buildrail"
+          codesign --force --sign - "$binary"
+          codesign --verify --verbose "$binary"
+
+      # Per platform: a download for people (a zip on Windows, a .tar.gz
+      # elsewhere, with the README and changelog) and the update payload,
+      # which is the bare executable gzipped. `gzip` is Git Bash's on Windows,
+      # so the payload is a real gzip file there too; `gzip -t` proves it.
+      - name: Package
+        run: |
+          name="buildrail-v$VERSION-$TARGET"
+          if [ "$RUNNER_OS" = "Windows" ]; then exe=buildrail.exe; else exe=buildrail; fi
+          binary="target/$TRIPLE/release/$exe"
+          mkdir -p dist "$name"
+          cp "$binary" README.md CHANGELOG.md "$name/"
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            # Double-click helper: the real strip against made-up builds.
+            printf '@echo off\r\nstart "" "%%~dp0buildrail.exe" --demo\r\n' > "$name/Try the demo.cmd"
+            7z a -tzip "dist/$name.zip" "$name" > /dev/null
+          else
+            chmod +x "$name/$exe"
+            tar -czf "dist/$name.tar.gz" "$name"
+          fi
+          gzip -9 -n -c "$binary" > "dist/$name.gz"
+          gzip -t "dist/$name.gz"
+          ls -l dist
+
+      - name: Upload to the draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: gh release upload "v$VERSION" dist/* --clobber
+
+      # For the publish job, which signs the payloads and checksums
+      # everything without downloading from the draft first.
+      - uses: actions/upload-artifact@v7
+        with:
+          name: dist-${{ matrix.target }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Publish
+    needs: [prepare, build]
+    # Only when every build succeeded: failure() is true if any did not.
+    if: ${{ !failure() && !cancelled() && !inputs.dry_run }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+      SIGNED: ${{ needs.prepare.outputs.signed }}
+      # Only the platforms this release was built for.
+      TARGETS: ${{ needs.prepare.outputs.targets }}
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: refs/tags/v${{ needs.prepare.outputs.version }}
+
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: dist-*
+          path: dist
+          merge-multiple: true
+
+      - uses: dtolnay/rust-toolchain@stable
+        if: needs.prepare.outputs.signed == 'true'
+
+      - uses: Swatinem/rust-cache@v2
+        if: needs.prepare.outputs.signed == 'true'
+        with:
+          shared-key: release-tools
+
+      - name: Sign the update payloads into latest.json
+        if: needs.prepare.outputs.signed == 'true'
+        env:
+          BUILDRAIL_UPDATE_SIGNING_KEY: ${{ secrets.BUILDRAIL_UPDATE_SIGNING_KEY }}
+        run: |
+          payloads=()
+          for target in $TARGETS; do payloads+=(--payload "$target=dist/buildrail-v$VERSION-$target.gz"); done
+          cargo run --quiet --locked -p buildrail-sign -- manifest \
+            --version "$VERSION" \
+            --notes-url "https://github.com/$GH_REPO/releases/tag/v$VERSION" \
+            --base-url "https://github.com/$GH_REPO/releases/download/v$VERSION" \
+            "${payloads[@]}" > "$RUNNER_TEMP/latest.json"
+          mv "$RUNNER_TEMP/latest.json" dist/latest.json
+          cat dist/latest.json
+
+      # Checked with the public key alone, the way an installed copy checks
+      # it, before anyone can be offered it.
+      - name: Check latest.json the way the app will
+        if: needs.prepare.outputs.signed == 'true'
+        env:
+          BUILDRAIL_UPDATE_PUBLIC_KEY: ${{ needs.prepare.outputs.public_key }}
+          KEY_ID: ${{ needs.prepare.outputs.key_id }}
+        run: |
+          payloads=()
+          for target in $TARGETS; do payloads+=(--payload "$target=dist/buildrail-v$VERSION-$target.gz"); done
+          cargo run --quiet --locked -p buildrail-sign -- verify --manifest dist/latest.json "${payloads[@]}"
+          jq -e --arg v "$VERSION" --arg k "$KEY_ID" '.version == $v and .key_id == $k' dist/latest.json > /dev/null || {
+            echo "::error::latest.json does not say version $VERSION and key $KEY_ID."
+            exit 1
+          }
+          echo "latest.json verifies against key $KEY_ID."
+
+      - name: Write SHA256SUMS.txt
+        run: |
+          cd dist
+          sha256sum -- * > "$RUNNER_TEMP/SHA256SUMS.txt"
+          mv "$RUNNER_TEMP/SHA256SUMS.txt" SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Upload latest.json and SHA256SUMS.txt
+        run: |
+          files=(dist/SHA256SUMS.txt)
+          if [ "$SIGNED" = "true" ]; then files+=(dist/latest.json); fi
+          gh release upload "v$VERSION" "${files[@]}" --clobber
+
+      # The last gate. Every expected file must be on the draft, and what is
+      # on the draft must match the checksums, or the release stays a draft
+      # and nobody is offered it.
+      - name: Check the draft has everything
+        run: |
+          if [ -z "$TARGETS" ]; then
+            echo "::error::No platform list came from prepare, so there is nothing to check against."
+            exit 1
+          fi
+          expected=(SHA256SUMS.txt)
+          for target in $TARGETS; do
+            case "$target" in windows-*) download=zip ;; *) download=tar.gz ;; esac
+            expected+=("buildrail-v$VERSION-$target.$download" "buildrail-v$VERSION-$target.gz")
+          done
+          if [ "$SIGNED" = "true" ]; then expected+=(latest.json); fi
+          on_draft=$(gh release view "v$VERSION" --json assets --jq '.assets[] | select(.size > 0) | .name')
+          missing=""
+          for name in "${expected[@]}"; do
+            grep -qxF "$name" <<< "$on_draft" || missing="$missing $name"
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::v$VERSION stays a draft: missing or empty on it:$missing. Re-run the failed jobs."
+            exit 1
+          fi
+          mkdir "$RUNNER_TEMP/check"
+          gh release download "v$VERSION" --dir "$RUNNER_TEMP/check"
+          (cd "$RUNNER_TEMP/check" && sha256sum --check --strict SHA256SUMS.txt)
+          echo "All ${#expected[@]} files are on the draft and match their checksums."
+
+      - name: Publish
+        run: |
+          if ! gh release edit "v$VERSION" --draft=false --latest; then
+            echo "::error::Everything is on the draft, but GitHub refused to publish it. Open https://github.com/$GH_REPO/releases and press Publish release on v$VERSION."
+            exit 1
+          fi
+          {
+            echo "## Published BuildRail v$VERSION"
+            echo
+            echo "https://github.com/$GH_REPO/releases/tag/v$VERSION"
+            if [ "$SIGNED" = "true" ]; then
+              echo
+              echo "Running copies will find it on their next update check."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

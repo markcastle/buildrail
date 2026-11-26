@@ -117,6 +117,7 @@ pub struct SettingsWindow {
     export_path: String,
     share_message: Option<(widgets::Tone, String)>,
     device_message: Option<String>,
+    about_message: Option<String>,
     /// When a preference last landed (egui time), for the Saved mark.
     saved_at: Option<f64>,
 }
@@ -149,6 +150,7 @@ impl SettingsWindow {
             export_path: String::new(),
             share_message: None,
             device_message: None,
+            about_message: None,
             saved_at: None,
         }
     }
@@ -260,7 +262,7 @@ impl SettingsWindow {
                                         self.strip_page(ui, controller, device, tokens)
                                 }
                                 Page::Share => self.share_page(ui, controller, tokens, &mut inputs),
-                                Page::About => about::page(ui, tokens),
+                                Page::About => self.about_page(ui, controller, tokens),
                             }
                         });
                 });

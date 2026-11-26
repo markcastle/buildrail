@@ -61,7 +61,7 @@ pub fn toast(ui: &mut Ui, tokens: &Tokens, tone: Tone, sentence: &str) {
                         IconKind::Cross,
                         ink.priority,
                         tokens.text,
-                        0.0,
+                        0,
                     ),
                 }
                 let room = ui.available_width();
@@ -102,7 +102,7 @@ pub fn error_line(ui: &mut Ui, tokens: &Tokens, sentence: &str) {
             IconKind::Cross,
             tokens.priority,
             tokens.bg,
-            0.0,
+            0,
         );
         let galley = wrapped(
             ui,

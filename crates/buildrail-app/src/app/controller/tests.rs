@@ -620,3 +620,334 @@ fn preview_without_source_and_with_broken_store() {
     };
     assert!(result.unwrap_err().message().contains("not available"));
 }
+
+#[test]
+fn prepare_for_restart_stops_flushes_and_releases_everything() {
+    use buildrail_platform::single_instance::{InMemoryInstances, SingleInstance};
+
+    use crate::app::lifecycle::{Held, InstanceLock};
+
+    let mut t = T::new();
+    t.connect(ProviderKind::GitHub, "work", "tok");
+    t.world
+        .github
+        .set("keevoro", Ok(vec![record("1", BuildStatus::Passed)]));
+    t.pin(gh_draft("Keevoro", "work", "keevoro")).unwrap();
+    t.wait_for("passed", |s| {
+        s.entries.first().is_some_and(|e| e.status_text == "Passed")
+    });
+    let instances = InMemoryInstances::new();
+    let lock = Arc::new(InstanceLock::new(instances.acquire("BuildRail").unwrap()));
+    t.app.lifecycle().hold(lock.clone());
+
+    struct Stuck;
+    impl Held for Stuck {
+        fn name(&self) -> &'static str {
+            "screen edge"
+        }
+        fn release(&self) -> Result<(), String> {
+            Err("not in time".into())
+        }
+    }
+
+    // Everything released, the cache written for the next process.
+    std::fs::remove_file(t.paths.snapshot_cache_file()).ok();
+    std::fs::remove_file(t.paths.device_prefs_file()).unwrap();
+    assert!(t.app.prepare_for_restart().is_ok());
+    assert!(
+        !instances.is_held("BuildRail"),
+        "the next instance can start"
+    );
+    assert!(t.paths.device_prefs_file().exists());
+    let cached = t.paths.snapshot_cache().load();
+    assert_eq!(cached.len(), 1);
+    assert_eq!(
+        cached[0].record.as_ref().map(|r| r.status),
+        Some(BuildStatus::Passed)
+    );
+    // The engine is stopped.
+    t.app.refresh_now();
+
+    // What could not be released is reported, and calling again is safe.
+    t.app.lifecycle().hold(Arc::new(Stuck));
+    let error = t.app.prepare_for_restart().unwrap_err();
+    assert_eq!(error.problems, ["screen edge: not in time"]);
+    assert!(error.to_string().contains("not everything was ready"));
+}
+
+#[test]
+fn dialogs_and_the_log_folder_go_through_their_ports() {
+    let t = T::new();
+    t.world.dialogs.answer(Some("/tmp/in.toml".into()));
+    assert_eq!(t.app.choose_import_file(), Some("/tmp/in.toml".into()));
+    assert_eq!(t.app.choose_export_file(), None);
+    assert_eq!(t.world.dialogs.asked(), ["open", "save builds.toml"]);
+    assert_eq!(t.app.logs_dir(), Some(t.paths.logs_dir()));
+    assert!(t.app.open_log_folder().is_err(), "no folder yet");
+    std::fs::create_dir_all(t.paths.logs_dir()).unwrap();
+    t.app.open_log_folder().unwrap();
+    assert_eq!(t.world.folders.opened(), [t.paths.logs_dir().to_owned()]);
+}
+
+// ------------------------------------------------------------- updates
+
+mod updates {
+    use buildrail_update::{InstallError, UpdateStatus};
+
+    use super::*;
+    use crate::app::lifecycle::Held;
+    use crate::fakes::ScriptedUpdateService;
+    use crate::presentation::{UpdateAnswer, UpdateState};
+
+    fn wait(t: &T, what: &str, check: impl Fn(&UpdateState) -> bool) -> UpdateState {
+        let deadline = Instant::now() + WAIT;
+        loop {
+            let state = t.app.update_state();
+            if check(&state) {
+                return state;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for {what}: {state:?}"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    fn checked(t: &T) -> UpdateAnswer {
+        t.app.check_for_updates();
+        wait(t, "the answer", |s| !s.checking);
+        t.app.update_answer()
+    }
+
+    /// Notes "release" among the update service's calls when released.
+    struct Noting(Arc<ScriptedUpdateService>);
+
+    impl Held for Noting {
+        fn name(&self) -> &'static str {
+            "screen edge"
+        }
+        fn release(&self) -> Result<(), String> {
+            self.0.note("release");
+            Ok(())
+        }
+    }
+
+    fn available(t: &T) {
+        t.world
+            .updates
+            .answer(ScriptedUpdateService::available("0.3.0"));
+        assert!(matches!(checked(t), UpdateAnswer::Available(_)));
+    }
+
+    /// Polls like the UI does, once a frame, until a restart is due.
+    fn poll_until_restart(t: &mut T) -> bool {
+        let deadline = Instant::now() + WAIT;
+        while Instant::now() < deadline {
+            if t.app.poll_update() {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        false
+    }
+
+    #[test]
+    fn check_for_updates_answers_every_status_in_one_line() {
+        let t = T::new();
+        assert_eq!(t.app.update_answer(), UpdateAnswer::Nothing);
+        assert_eq!(
+            t.app.current_version().to_string(),
+            env!("CARGO_PKG_VERSION")
+        );
+        let line = |t: &T| checked(t).line().unwrap();
+        assert_eq!(line(&t), "Up to date.");
+        t.world.updates.answer(ScriptedUpdateService::failed());
+        assert_eq!(
+            line(&t),
+            "Update check failed: the server answered HTTP 503."
+        );
+        t.world.updates.answer(UpdateStatus::NotConfigured);
+        assert!(line(&t).starts_with("This build does not update itself."));
+        t.world
+            .updates
+            .answer(ScriptedUpdateService::available("0.3.0"));
+        assert_eq!(line(&t), "BuildRail 0.3.0 is available.");
+        assert_eq!(
+            t.app.update_chip().unwrap().accessible_name(),
+            "BuildRail 0.3.0 is available. Open update options"
+        );
+        // Not now: the chip goes for this version; About still says so.
+        t.app.dismiss_update();
+        assert!(t.app.update_chip().is_none());
+        assert!(matches!(t.app.update_answer(), UpdateAnswer::Available(o) if o.dismissed));
+        assert_eq!(t.world.updates.checks(), 4);
+    }
+
+    #[test]
+    fn install_releases_everything_before_restarting() {
+        let mut t = T::new();
+        available(&t);
+        t.app
+            .lifecycle()
+            .hold(Arc::new(Noting(t.world.updates.clone())));
+        std::fs::remove_file(t.paths.device_prefs_file()).ok();
+        t.app.install_update();
+        t.app.install_update(); // a double click
+        assert!(t.app.update_state().installing);
+        assert!(poll_until_restart(&mut t), "restart due");
+        assert_eq!(
+            t.world.updates.calls(),
+            ["check", "install 0.3.0", "release", "restart"]
+        );
+        assert!(t.paths.device_prefs_file().exists(), "preferences written");
+        assert!(t.app.update_state().installing, "buttons stay disabled");
+        assert!(!t.app.poll_update(), "only once");
+        // Nothing more to install.
+        t.app.install_update();
+        assert_eq!(t.world.updates.calls().len(), 4);
+    }
+
+    #[test]
+    fn a_failed_install_changes_nothing_and_keeps_running() {
+        let mut t = T::new();
+        available(&t);
+        t.app
+            .lifecycle()
+            .hold(Arc::new(Noting(t.world.updates.clone())));
+        t.world
+            .updates
+            .fail_install(InstallError::Replace("disk full".into()));
+        t.app.install_update();
+        let state = wait(&t, "the failure", |s| !s.installing);
+        assert_eq!(
+            state.install_error.as_deref(),
+            Some("Update not installed: could not replace the program file (disk full).")
+        );
+        assert!(!t.app.poll_update());
+        assert_eq!(t.world.updates.calls(), ["check", "install 0.3.0"]);
+        assert_eq!(
+            t.app.update_chip().unwrap().error(),
+            state.install_error.as_deref()
+        );
+        // Still refreshing: the engine was never stopped.
+        t.connect(ProviderKind::GitHub, "work", "tok");
+        t.world
+            .github
+            .set("keevoro", Ok(vec![record("1", BuildStatus::Passed)]));
+        t.pin(gh_draft("Keevoro", "work", "keevoro")).unwrap();
+        t.wait_for("passed", |s| {
+            s.entries.first().is_some_and(|e| e.status_text == "Passed")
+        });
+        // Trying again works once the problem is gone.
+        t.world.updates.fail_install(InstallError::Decompress);
+        t.app.install_update();
+        wait(&t, "second failure", |s| {
+            s.install_error.as_deref()
+                == Some("Update not installed: the download could not be decompressed.")
+        });
+    }
+
+    #[test]
+    fn a_restart_that_fails_still_closes() {
+        let mut t = T::new();
+        available(&t);
+        t.world.updates.fail_restart("no such file");
+        t.app.install_update();
+        assert!(poll_until_restart(&mut t));
+        assert_eq!(
+            t.world.updates.calls(),
+            ["check", "install 0.3.0", "restart"]
+        );
+    }
+
+    #[test]
+    fn automatic_install_waits_for_a_quiet_moment() {
+        let mut t = T::new();
+        // Off by default: offered, never installed.
+        available(&t);
+        t.app.maybe_install_automatically(false);
+        assert!(!t.app.update_state().installing);
+        assert!(t.app.update_chip().is_some());
+
+        t.app
+            .update_prefs(|p| p.update_automatically = true)
+            .unwrap();
+        assert!(t.app.update_chip().is_none(), "quiet until it installs");
+        // A build is running: wait.
+        t.connect(ProviderKind::GitHub, "work", "tok");
+        t.world
+            .github
+            .set("keevoro", Ok(vec![record("1", BuildStatus::Running)]));
+        t.pin(gh_draft("Keevoro", "work", "keevoro")).unwrap();
+        t.wait_for("building", |s| {
+            s.entries
+                .first()
+                .is_some_and(|e| e.status_text == "Building")
+        });
+        t.app.maybe_install_automatically(false);
+        assert!(!t.app.update_state().installing);
+        // It finished, but Settings is open: wait.
+        t.world
+            .github
+            .set("keevoro", Ok(vec![record("1", BuildStatus::Passed)]));
+        t.wait_for("passed", |s| {
+            s.entries.first().is_some_and(|e| e.status_text == "Passed")
+        });
+        t.app.maybe_install_automatically(true);
+        assert!(!t.app.update_state().installing);
+        // A failed automatic install is offered instead, not retried.
+        t.world.updates.fail_install(InstallError::Decompress);
+        t.app.maybe_install_automatically(false);
+        wait(&t, "the failure", |s| s.install_error.is_some());
+        assert!(t.app.update_chip().is_some(), "offered with the error");
+        t.app.maybe_install_automatically(false);
+        assert_eq!(
+            t.world
+                .updates
+                .calls()
+                .iter()
+                .filter(|c| c.starts_with("install"))
+                .count(),
+            1
+        );
+        // A newer release is tried automatically again.
+        t.world
+            .updates
+            .answer(ScriptedUpdateService::available("0.3.1"));
+        checked(&t);
+        t.world.updates.install_succeeds();
+        t.app.maybe_install_automatically(false);
+        assert!(poll_until_restart(&mut t));
+    }
+}
+
+#[test]
+fn closing_writes_the_cache_and_releases_everything() {
+    use buildrail_platform::single_instance::{InMemoryInstances, SingleInstance};
+
+    use crate::app::lifecycle::InstanceLock;
+
+    let mut t = T::new();
+    t.connect(ProviderKind::GitHub, "work", "tok");
+    t.world
+        .github
+        .set("keevoro", Ok(vec![record("1", BuildStatus::Failed)]));
+    t.pin(gh_draft("Keevoro", "work", "keevoro")).unwrap();
+    t.wait_for("failed", |s| {
+        s.entries.first().is_some_and(|e| e.status_text == "Failed")
+    });
+    let instances = InMemoryInstances::new();
+    t.app.lifecycle().hold(Arc::new(InstanceLock::new(
+        instances.acquire("BuildRail").unwrap(),
+    )));
+    std::fs::remove_file(t.paths.snapshot_cache_file()).ok();
+    t.app.close();
+    assert!(!instances.is_held("BuildRail"));
+    let cached = t.paths.snapshot_cache().load();
+    assert_eq!(
+        cached[0].record.as_ref().map(|r| r.status),
+        Some(BuildStatus::Failed)
+    );
+    t.app.close(); // idempotent
+}

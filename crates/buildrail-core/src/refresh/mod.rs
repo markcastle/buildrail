@@ -11,6 +11,8 @@
 //!   order, the record selected for each shared request, cached seeds.
 //! * [`fetch`] – one provider request and the mapping of its failures.
 //! * [`wake`] – detecting system sleep from a wall-clock jump.
+//! * [`save`] – when the snapshot cache is worth writing (material changes
+//!   at once, timestamp drift every few minutes, the rest on shutdown).
 //! * [`engine`] – the async driver that ties the above to the ports, plus
 //!   the cheap [`RefreshHandle`] the (synchronous) UI uses.
 //!
@@ -22,6 +24,7 @@ pub mod board;
 pub mod engine;
 pub mod fetch;
 pub mod policy;
+pub mod save;
 pub mod schedule;
 pub mod wake;
 
@@ -29,5 +32,6 @@ pub use board::Board;
 pub use engine::{EngineStopped, RefreshEngine, RefreshHandle, Snapshots};
 pub use fetch::{FetchError, SourceRegistry};
 pub use policy::RefreshPolicy;
+pub use save::{SavePolicy, SaveTracker};
 pub use schedule::{Outcome, Schedule};
 pub use wake::WakeDetector;
