@@ -1,0 +1,38 @@
+{
+  "total_count": 3,
+  "jobs": [
+    {
+      "id": 399444496,
+      "run_id": 30433642,
+      "run_attempt": 2,
+      "status": "completed",
+      "conclusion": "success",
+      "name": "lint",
+      "started_at": "2026-11-16T10:06:05Z",
+      "completed_at": "2026-11-16T10:07:00Z",
+      "html_url": "https://github.com/octo-org/octo-repo/actions/runs/30433642/job/399444496",
+      "steps": [
+        { "name": "Set up job", "status": "completed", "conclusion": "success", "number": 1, "started_at": "2026-11-16T10:06:05Z", "completed_at": "2026-11-16T10:06:06Z" },
+        { "name": "cargo clippy", "status": "completed", "conclusion": "success", "number": 2, "started_at": "2026-11-16T10:06:06Z", "completed_at": "2026-11-16T10:07:00Z" }
+      ],
+      "runner_name": "GitHub Actions 2",
+      "labels": ["ubuntu-latest"]
+    },
+    {
+      "id": 399444497,
+      "run_id": 30433642,
+      "run_attempt": 2,
+      "status": "completed",
+      "conclusion": "failure",
+      "name": "test (ubuntu-latest)",
+      "started_at": "2026-11-16T10:06:05Z",
+      "completed_at": "2026-11-16T10:09:00Z",
+      "html_url": "https://github.com/octo-org/octo-repo/actions/runs/30433642/job/399444497",
+      "steps": [
+        { "name": "Set up job", "status": "completed", "conclusion": "success", "number": 1 },
+        { "name": "cargo test", "status": "completed", "conclusion": "failure", "number": 4 },
+        { "name": "Upload logs", "status": "completed", "conclusion": "skipped", "number": 5 }
+      ]
+    }
+  ]
+}

@@ -3,12 +3,14 @@
 //! the real window does.
 //!
 //! Each frame ends by scheduling the next one with
-//! [`RepaintPlanner`]: when the words on the strip next change on their
-//! own, or the next animation step when the user turned Animation on.
+//! [`RepaintPlanner`]: when the words on the strip (or in an open details
+//! panel) next change on their own, or the next animation step when the
+//! user turned Animation on.
 //! Nothing else here asks for frames, so an idle strip paints nothing.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use eframe::egui::{self, Ui, ViewportBuilder, ViewportId};
 
@@ -18,7 +20,7 @@ use super::strip::{StripAction, StripView};
 use super::style;
 use super::theme::Tokens;
 use crate::app::AppController;
-use crate::presentation::repaint::animation_phase;
+use crate::presentation::repaint::{animation_phase, CHANGE_SLACK};
 use crate::presentation::{Motion, RepaintPlanner};
 
 /// Counts painted frames (UI passes). Cheap to clone and to bump; shared
@@ -53,6 +55,22 @@ pub struct FrameOutput {
     /// The user chose Quit BuildRail, or an installed update is
     /// restarting the app: close the window.
     pub quit: bool,
+}
+
+/// The earlier of two optional delays.
+fn earliest(a: Option<Duration>, b: Option<Duration>) -> Option<Duration> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
+    }
+}
+
+/// How long from `now` until just after `at` (see [`CHANGE_SLACK`]).
+fn delay_until(at: chrono::DateTime<chrono::Utc>, now: chrono::DateTime<chrono::Utc>) -> Duration {
+    (at - now)
+        .to_std()
+        .unwrap_or(Duration::ZERO)
+        .saturating_add(CHANGE_SLACK)
 }
 
 /// Where the interface font comes from.
@@ -277,20 +295,39 @@ impl BuildRailUi {
 
         let now = self.controller.now();
         let model = self.controller.strip();
+        let details = self.controller.details_panel();
         let planner = self.planner();
         let phase = if planner.animating(&model) {
             animation_phase(ctx.input(|i| i.time))
         } else {
             0
         };
-        self.next_repaint = planner.next_repaint(&model, now);
+        self.next_repaint = earliest(
+            planner.next_repaint(&model, now),
+            details
+                .as_ref()
+                .and_then(|d| d.next_text_change(now))
+                .map(|at| delay_until(at, now)),
+        );
         if let Some(delay) = self.next_repaint {
             ctx.request_repaint_after(delay);
         }
-        for action in self.strip.show(ui, &model, &tokens, self.movable, phase) {
+        let actions = self
+            .strip
+            .show(ui, &model, details.as_ref(), &tokens, self.movable, phase);
+        for action in actions {
             match action {
                 StripAction::Open(url) => {
                     self.last_error = self.controller.open_url(&url).err();
+                }
+                StripAction::ShowDetails(watch) => self.controller.open_details(&watch),
+                StripAction::CloseDetails => self.controller.close_details(),
+                StripAction::RefreshDetails => self.controller.refresh_details(),
+                StripAction::RetryDetails => self.controller.retry_details(),
+                StripAction::EditBuild(watch) => {
+                    self.controller.close_details();
+                    self.settings.open_build(&watch);
+                    self.settings_open = true;
                 }
                 StripAction::OpenSettings => self.settings_open = true,
                 StripAction::AddBuild => {
@@ -298,6 +335,7 @@ impl BuildRailUi {
                     self.settings_open = true;
                 }
                 StripAction::Reconnect(watch) => {
+                    self.controller.close_details();
                     self.settings.open_reconnect(&watch, &self.controller);
                     self.settings_open = true;
                 }

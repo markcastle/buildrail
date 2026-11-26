@@ -7,11 +7,15 @@
 //! [`Command`](crate::settings::Command)s; it never touches a port directly.
 
 pub mod controller;
+pub mod details;
 pub mod lifecycle;
 pub mod ports;
 pub mod updates;
 
 pub use controller::{AppController, RepaintFn, RestartError};
+pub use details::{
+    DetailsAnswer, DetailsBook, DetailsError, DetailsFetch, DetailsLoad, DetailsView,
+};
 pub use lifecycle::{Held, InstanceLock, Lifecycle, ReleaseOnDrop};
-pub use ports::{Catalogs, CredentialStore, FileDialog, Services};
+pub use ports::{Catalogs, CredentialStore, DetailsSources, FileDialog, Services};
 pub use updates::{run_update_loop, NoUpdates, SharedUpdates, UpdateService};

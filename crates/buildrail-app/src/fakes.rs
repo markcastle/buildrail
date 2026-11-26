@@ -12,8 +12,9 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use async_trait::async_trait;
+use buildrail_core::details::{RunDetails, RunRef};
 use buildrail_core::domain::{BuildRecord, ProviderKind, WatchTarget};
-use buildrail_core::ports::{Clock, ProviderError, RunSource, Secret};
+use buildrail_core::ports::{Clock, ProviderError, RunDetailsSource, RunSource, Secret};
 use buildrail_core::refresh::SourceRegistry;
 use buildrail_platform::autostart::InMemoryAutostart;
 use buildrail_platform::credentials::InMemoryCredentialStore;
@@ -21,7 +22,7 @@ use buildrail_platform::folders::RecordingFolderOpener;
 use buildrail_platform::url_opener::RecordingUrlOpener;
 use buildrail_profile::AppPaths;
 
-use crate::app::{Catalogs, FileDialog, Services, UpdateService};
+use crate::app::{Catalogs, DetailsSources, FileDialog, Services, UpdateService};
 use buildrail_providers::catalog::{
     CloudflareAccount, CloudflareAccounts, CloudflareTokenCheck, CloudflareTokenStatus,
     CloudflareWorker, CloudflareWorkers, GitHubBranch, GitHubBranches, GitHubIdentity,
@@ -136,6 +137,90 @@ impl RunSource for ScriptedRunSource {
             Some(queue) if queue.len() > 1 => queue.pop_front().unwrap_or(Ok(Vec::new())),
             Some(queue) => queue.front().cloned().unwrap_or(Ok(Vec::new())),
             None => Ok(Vec::new()),
+        }
+    }
+}
+
+/// One scripted details answer.
+pub type DetailsReply = Result<RunDetails, ProviderError>;
+
+/// A [`RunDetailsSource`] answering from per-target scripts, like
+/// [`ScriptedRunSource`]: each target has a queue of replies and the last
+/// one repeats. A target with no script answers with bare details for the
+/// run asked about. A delay holds every answer back (to test answers that
+/// arrive after the panel moved on).
+#[derive(Debug)]
+pub struct ScriptedDetailsSource {
+    kind: ProviderKind,
+    replies: Mutex<HashMap<String, VecDeque<DetailsReply>>>,
+    calls: Mutex<Vec<(String, RunRef)>>,
+    delay: Mutex<std::time::Duration>,
+}
+
+impl ScriptedDetailsSource {
+    /// A source for `kind` with no scripts.
+    pub fn new(kind: ProviderKind) -> Self {
+        Self {
+            kind,
+            replies: Mutex::new(HashMap::new()),
+            calls: Mutex::new(Vec::new()),
+            delay: Mutex::new(std::time::Duration::ZERO),
+        }
+    }
+
+    /// Replaces the script for `name` with one reply that repeats.
+    pub fn set(&self, name: &str, reply: DetailsReply) {
+        lock(&self.replies).insert(name.to_owned(), VecDeque::from([reply]));
+    }
+
+    /// Appends a reply to the script for `name`.
+    pub fn push(&self, name: &str, reply: DetailsReply) {
+        lock(&self.replies)
+            .entry(name.to_owned())
+            .or_default()
+            .push_back(reply);
+    }
+
+    /// Holds every answer back by `delay`.
+    pub fn delay(&self, delay: std::time::Duration) {
+        *lock(&self.delay) = delay;
+    }
+
+    /// Target names and runs asked for so far, in order.
+    pub fn calls(&self) -> Vec<(String, RunRef)> {
+        lock(&self.calls).clone()
+    }
+
+    /// How many times `name` was asked about.
+    pub fn calls_for(&self, name: &str) -> usize {
+        lock(&self.calls).iter().filter(|(n, _)| n == name).count()
+    }
+}
+
+#[async_trait]
+impl RunDetailsSource for ScriptedDetailsSource {
+    fn provider(&self) -> ProviderKind {
+        self.kind
+    }
+
+    async fn run_details(
+        &self,
+        target: &WatchTarget,
+        run: &RunRef,
+        _credential: &Secret,
+    ) -> Result<RunDetails, ProviderError> {
+        let name = target_name(target).to_owned();
+        lock(&self.calls).push((name.clone(), run.clone()));
+        let delay = *lock(&self.delay);
+        if !delay.is_zero() {
+            tokio::time::sleep(delay).await;
+        }
+        let mut replies = lock(&self.replies);
+        let bare = || Ok(RunDetails::new(run.clone()));
+        match replies.get_mut(&name) {
+            Some(queue) if queue.len() > 1 => queue.pop_front().unwrap_or_else(bare),
+            Some(queue) => queue.front().cloned().unwrap_or_else(bare),
+            None => bare(),
         }
     }
 }
@@ -500,6 +585,10 @@ pub struct FakeWorld {
     pub github: Arc<ScriptedRunSource>,
     /// Cloudflare run source.
     pub cloudflare: Arc<ScriptedRunSource>,
+    /// GitHub details source.
+    pub github_details: Arc<ScriptedDetailsSource>,
+    /// Cloudflare details source.
+    pub cloudflare_details: Arc<ScriptedDetailsSource>,
     /// Both catalogues.
     pub catalog: Arc<FakeCatalog>,
     /// Credential store.
@@ -525,6 +614,8 @@ impl FakeWorld {
         Self {
             github: Arc::new(ScriptedRunSource::new(ProviderKind::GitHub)),
             cloudflare: Arc::new(ScriptedRunSource::new(ProviderKind::Cloudflare)),
+            github_details: Arc::new(ScriptedDetailsSource::new(ProviderKind::GitHub)),
+            cloudflare_details: Arc::new(ScriptedDetailsSource::new(ProviderKind::Cloudflare)),
             catalog: Arc::new(FakeCatalog::default()),
             credentials: Arc::new(InMemoryCredentialStore::new()),
             clock: Arc::new(ManualClock::new(now)),
@@ -541,8 +632,12 @@ impl FakeWorld {
         let sources = SourceRegistry::new()
             .with(self.github.clone())
             .with(self.cloudflare.clone());
+        let details = DetailsSources::new()
+            .with(self.github_details.clone())
+            .with(self.cloudflare_details.clone());
         Services {
             sources,
+            details,
             catalogs: Catalogs::from_pair(self.catalog.clone(), self.catalog.clone()),
             credentials: self.credentials.clone(),
             clock: self.clock.clone(),
@@ -615,6 +710,38 @@ mod tests {
             branch: None,
         };
         assert_eq!(target_name(&cf), "w");
+    }
+
+    #[tokio::test]
+    async fn scripted_details_play_queue_then_repeat_and_default_to_bare() {
+        use buildrail_core::domain::RunId;
+        let source = ScriptedDetailsSource::new(ProviderKind::GitHub);
+        assert_eq!(source.provider(), ProviderKind::GitHub);
+        let s = Secret::new("t");
+        let run = RunRef {
+            run_id: RunId::new("1"),
+            attempt: 2,
+        };
+        assert_eq!(
+            source.run_details(&gh("x"), &run, &s).await.unwrap(),
+            RunDetails::new(run.clone())
+        );
+        let mut named = RunDetails::new(run.clone());
+        named.title = Some("t".into());
+        source.push("x", Ok(named.clone()));
+        source.push("x", Err(ProviderError::Network("down".into())));
+        source.delay(std::time::Duration::from_millis(1));
+        assert_eq!(source.run_details(&gh("x"), &run, &s).await.unwrap(), named);
+        assert!(source.run_details(&gh("x"), &run, &s).await.is_err());
+        assert!(source.run_details(&gh("x"), &run, &s).await.is_err());
+        source.set("x", Ok(named.clone()));
+        assert!(source.run_details(&gh("x"), &run, &s).await.is_ok());
+        assert_eq!(source.calls_for("x"), 5);
+        assert_eq!(source.calls().len(), 5);
+        let set = DetailsSources::new().with(Arc::new(source));
+        assert!(set.get(ProviderKind::GitHub).is_some());
+        assert!(set.get(ProviderKind::Cloudflare).is_none());
+        assert!(format!("{set:?}").contains("GitHub"));
     }
 
     #[tokio::test]

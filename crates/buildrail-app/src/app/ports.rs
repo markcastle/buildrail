@@ -5,10 +5,13 @@
 //! real adapters, the `--demo` fakes and test fakes, and the controller
 //! cannot tell the difference.
 
+use std::collections::HashMap;
+use std::fmt;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use buildrail_core::ports::{Clock, CredentialReader, CredentialWriter};
+use buildrail_core::domain::ProviderKind;
+use buildrail_core::ports::{Clock, CredentialReader, CredentialWriter, RunDetailsSource};
 use buildrail_core::refresh::SourceRegistry;
 use buildrail_platform::autostart::Autostart;
 use buildrail_platform::folders::FolderOpener;
@@ -78,12 +81,59 @@ impl Catalogs {
     }
 }
 
+/// The [`RunDetailsSource`]s available, one per provider, for the details
+/// panel. Like the refresh engine's `SourceRegistry`, adding a provider
+/// means registering one more source.
+#[derive(Clone, Default)]
+pub struct DetailsSources {
+    sources: HashMap<ProviderKind, Arc<dyn RunDetailsSource>>,
+}
+
+impl DetailsSources {
+    /// An empty registry.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Registers `source` under the provider it reports, replacing any
+    /// previous one.
+    #[must_use]
+    pub fn with(mut self, source: Arc<dyn RunDetailsSource>) -> Self {
+        self.sources.insert(source.provider(), source);
+        self
+    }
+
+    /// The source for `provider`, if registered.
+    pub fn get(&self, provider: ProviderKind) -> Option<&Arc<dyn RunDetailsSource>> {
+        self.sources.get(&provider)
+    }
+}
+
+impl FromIterator<Arc<dyn RunDetailsSource>> for DetailsSources {
+    fn from_iter<I: IntoIterator<Item = Arc<dyn RunDetailsSource>>>(iter: I) -> Self {
+        iter.into_iter().fold(Self::new(), Self::with)
+    }
+}
+
+impl fmt::Debug for DetailsSources {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut providers: Vec<_> = self.sources.keys().collect();
+        providers.sort();
+        f.debug_struct("DetailsSources")
+            .field("providers", &providers)
+            .finish()
+    }
+}
+
 /// Everything the controller needs from the outside world.
 #[derive(Clone)]
 pub struct Services {
     /// Run sources per provider, shared by the refresh engine and the
     /// wizard's preview.
     pub sources: SourceRegistry,
+    /// Details sources per provider, for the details panel (fetched on
+    /// demand, never by the refresh engine).
+    pub details: DetailsSources,
     /// Catalogue ports for the wizard.
     pub catalogs: Catalogs,
     /// The OS credential store (or a fake).

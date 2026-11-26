@@ -6,7 +6,8 @@
 //!   (tick, ring with tick, filled disc with a cross, clock, …) so state
 //!   reads without colour.
 //! * Action glyphs: [`paint_gear`] (settings), [`paint_plus`] (add),
-//!   [`paint_chevron_right`], [`paint_arrow_left`] (back), [`paint_tick`].
+//!   [`paint_chevron_right`], [`paint_arrow_left`] (back), [`paint_tick`],
+//!   [`paint_close`].
 //! * Provider marks ([`paint_provider_mark`]) are the plain letters "GH" /
 //!   "CF" in a small well: deliberately not the providers' logo artwork.
 //!
@@ -191,6 +192,13 @@ pub fn paint_plus(painter: &Painter, center: Pos2, size: f32, color: Color32) {
     let g = Grid::new(center, size, color);
     g.line(painter, &[(5.0, 12.0), (19.0, 12.0)]);
     g.line(painter, &[(12.0, 5.0), (12.0, 19.0)]);
+}
+
+/// Draws the close glyph: a cross of two strokes.
+pub fn paint_close(painter: &Painter, center: Pos2, size: f32, color: Color32) {
+    let g = Grid::new(center, size, color);
+    g.line(painter, &[(6.0, 6.0), (18.0, 18.0)]);
+    g.line(painter, &[(18.0, 6.0), (6.0, 18.0)]);
 }
 
 /// Draws a chevron pointing right (a row that opens something).

@@ -119,36 +119,62 @@ fn order_is_stable_when_a_failed_build_is_rerun() {
 }
 
 #[test]
-fn keyboard_focus_shows_details_and_enter_opens_the_run() {
+fn keyboard_focus_shows_the_summary_enter_shows_details_and_ctrl_enter_opens_the_run() {
+    use eframe::egui::Modifiers;
+
     let f = three_builds();
-    let mut h = f.harness([900.0, 24.0]);
+    let mut h = f.harness([900.0, 600.0]);
     wait_all_loaded(&mut h);
 
     h.get_by_label(KEEVORO).focus();
     h.step();
     h.step();
     assert!(h.get_by_label(KEEVORO).is_focused());
-    // Focus reveals the same details as hover.
+    // Focus reveals the same summary as hover.
     assert!(h.query_by_label("Failing job: test").is_some());
     assert!(h.query_by_label("Commit a7c412e").is_some());
+    assert!(h
+        .query_by_label("Click or press Enter for details. Double-click to open the run.")
+        .is_some());
 
+    // Enter shows the details; nothing opens in the browser.
     h.key_press(Key::Enter);
+    step_until(&mut h, "details", |h| {
+        h.query_by_label_contains("Keevoro, Failed, GitHub · acme/keevoro")
+            .is_some()
+    });
+    assert!(f.world.urls.opened().is_empty());
+    h.key_press(Key::Escape);
+    step_until(&mut h, "closed", |h| {
+        h.query_by_role_and_label(Role::Button, "Open run")
+            .is_none()
+    });
+    assert!(h.get_by_label(KEEVORO).is_focused(), "focus came back");
+
+    // Ctrl+Enter opens the run straight away.
+    h.key_press_modifiers(Modifiers::COMMAND, Key::Enter);
+    h.step();
     h.step();
     assert_eq!(
         f.world.urls.opened(),
         vec!["https://github.com/acme/keevoro/actions/runs/7".to_owned()]
     );
+    assert!(h
+        .query_by_role_and_label(Role::Button, "Open run")
+        .is_none());
 
-    // Arrow keys move between entries; Space activates too.
+    // Arrow keys move between entries; Space shows details too.
     h.key_press(Key::ArrowRight);
     h.step();
     h.step();
     assert!(h.get_by_label_contains("Site, Cloudflare").is_focused());
     h.key_press(Key::Space);
-    h.step();
-    assert_eq!(f.world.urls.opened().len(), 2);
+    step_until(&mut h, "site details", |h| {
+        h.query_by_label_contains("Site, Deployed, Cloudflare · Worker site")
+            .is_some()
+    });
 
-    // Hover shows details as well.
+    // Hover shows the summary as well.
     h.get_by_label("Docs, Cloudflare, No runs yet").hover();
     h.step();
     h.step();
@@ -220,12 +246,19 @@ fn overflow_counts_hidden_failures() {
     assert!(label.ends_with("2 failed"), "{label}");
     assert!(entries(&h).len() < 4);
 
-    // Activating it lists the hidden builds; choosing one opens it.
+    // Activating it lists the hidden builds; choosing one shows its
+    // details, and Open run opens it.
     overflow.click();
     h.step();
     h.step();
     let hidden = h.get_by_label_contains("Payments, GitHub, Failed");
     hidden.click();
+    step_until(&mut h, "payments details", |h| {
+        h.query_by_label_contains("Payments, Failed, GitHub")
+            .is_some()
+    });
+    assert!(!h.state().strip_view().is_overflow_open());
+    h.get_by_role_and_label(Role::Button, "Open run").click();
     h.step();
     assert!(f.world.urls.opened()[0].contains("/payments/"));
 }
@@ -261,11 +294,19 @@ fn reconnect_needed_entry_opens_settings() {
         h.query_by_label("Billing, GitHub, Reconnect needed, branch main")
             .is_some()
     });
+    // A click explains what is wrong; Reconnect opens the form.
     h.get_by_label("Billing, GitHub, Reconnect needed, branch main")
         .click();
+    step_until(&mut h, "details", |h| {
+        h.query_by_label_contains("no longer accepts the token")
+            .is_some()
+    });
+    assert!(!h.state().is_settings_open());
+    h.get_by_role_and_label(Role::Button, "Reconnect").click();
     h.step();
     h.step();
     assert!(h.state().is_settings_open());
+    assert_eq!(h.state().controller().details_open(), None);
     assert!(h.query_by_label_contains("Or paste a new token").is_some());
 }
 

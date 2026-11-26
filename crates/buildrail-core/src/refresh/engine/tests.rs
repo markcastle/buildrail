@@ -531,7 +531,11 @@ async fn refresh_request_fetches_only_that_request_now() {
     h.handle.refresh_request(key).unwrap();
     until(t0, 41).await;
     assert_eq!(h.github.calls_to("a"), vec![0, 30, 40]);
-    assert_eq!(h.github.calls_to("b"), vec![0, 30], "others keep their timing");
+    assert_eq!(
+        h.github.calls_to("b"),
+        vec![0, 30],
+        "others keep their timing"
+    );
     // An unknown request is ignored.
     let unknown = RequestKey::from(&gh("x", "work", "zzz"));
     h.handle.refresh_request(unknown).unwrap();

@@ -9,7 +9,9 @@
 //! * `build_outcome` (null until stopped): `success`, `fail`, `skipped`,
 //!   `cancelled`, `terminated`.
 
+use buildrail_core::details::Trigger;
 use buildrail_core::domain::BuildStatus;
+use chrono::{DateTime, Utc};
 
 /// Cloudflare dashboard origin used for [`dashboard_build_url`].
 pub const DASHBOARD_URL: &str = "https://dash.cloudflare.com";
@@ -82,6 +84,40 @@ pub fn is_production_deploy(
         !(command.contains("versions upload") || command.contains("wrangler preview"))
     });
     production_trigger && deploys
+}
+
+/// Maps `build_trigger_metadata.build_trigger_source` to a [`Trigger`].
+///
+/// ASSUMPTION: the schema types this field as a plain string without
+/// listing its values. The fixtures and observed builds say `push`; the
+/// other spellings accepted here (`push_event`, `pull_request`, `manual`,
+/// `dashboard`, `api`, `deploy_hook`) are guesses at the dashboard's
+/// "Retry build", the builds API's trigger call and deploy hooks. Anything
+/// else keeps Cloudflare's own word.
+pub fn map_trigger_source(source: Option<&str>) -> Trigger {
+    match source.map(str::trim) {
+        None | Some("") => Trigger::Unknown,
+        Some("push" | "push_event") => Trigger::Push,
+        Some("pull_request" | "pull_request_event") => Trigger::PullRequest,
+        Some("manual" | "dashboard") => Trigger::Manual,
+        Some("api" | "deploy_hook") => Trigger::Api,
+        Some(other) => Trigger::Other(other.to_owned()),
+    }
+}
+
+/// When a build started running: `running_on`, else `initializing_on`,
+/// else `created_on`; `None` while it is still queued.
+///
+/// ASSUMPTION: `running_on` and `initializing_on` are documented build
+/// fields but not described; they are read as the moments the build left
+/// the queue (initializing) and started its commands (running).
+pub fn build_started_at(
+    status: &str,
+    initializing_on: Option<DateTime<Utc>>,
+    running_on: Option<DateTime<Utc>>,
+    created_on: DateTime<Utc>,
+) -> Option<DateTime<Utc>> {
+    (status != "queued").then(|| running_on.or(initializing_on).unwrap_or(created_on))
 }
 
 /// Dashboard page of one build.
@@ -170,6 +206,43 @@ mod tests {
         assert!(!is_production_deploy(Some(&v(&["a", "b"])), &[], None));
         assert!(!is_production_deploy(Some(&[]), &[], None));
         assert!(!is_production_deploy(None, &[], None));
+    }
+
+    #[test]
+    fn trigger_sources() {
+        let cases = [
+            (None, Trigger::Unknown),
+            (Some(" "), Trigger::Unknown),
+            (Some("push"), Trigger::Push),
+            (Some("push_event"), Trigger::Push),
+            (Some("pull_request"), Trigger::PullRequest),
+            (Some("manual"), Trigger::Manual),
+            (Some("deploy_hook"), Trigger::Api),
+            (Some("api"), Trigger::Api),
+            (Some("cron"), Trigger::Other("cron".into())),
+        ];
+        for (source, expected) in cases {
+            assert_eq!(map_trigger_source(source), expected, "{source:?}");
+        }
+    }
+
+    #[test]
+    fn started_at_prefers_running_then_initializing() {
+        use chrono::TimeZone;
+        let at = |s: i64| Utc.timestamp_opt(1_700_000_000 + s, 0).unwrap();
+        assert_eq!(
+            build_started_at("queued", Some(at(1)), Some(at(2)), at(0)),
+            None
+        );
+        assert_eq!(
+            build_started_at("running", Some(at(1)), Some(at(2)), at(0)),
+            Some(at(2))
+        );
+        assert_eq!(
+            build_started_at("initializing", Some(at(1)), None, at(0)),
+            Some(at(1))
+        );
+        assert_eq!(build_started_at("stopped", None, None, at(0)), Some(at(0)));
     }
 
     #[test]

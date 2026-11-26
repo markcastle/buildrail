@@ -43,7 +43,9 @@ Each entry is the provider, your short label, a status icon and a status word.
 | Red | Failed |
 | Neutral | Cancelled, skipped or unavailable (each has its own word and icon) |
 
-Hover over an entry, or move to it with Tab or the arrow keys, to see the branch, commit, age and failing job. Click it, or press Enter, to open the run on the provider's site. When the strip is too narrow, the entries that do not fit collapse into an overflow marker that shows how many of them are failing.
+![A build's details panel: its jobs with the failed one first, the run's facts and its recent runs](docs/images/details-failed-dark.png)
+
+Hover over an entry, or move to it with Tab or the arrow keys, to see the branch, commit, age and failing job. Click it, or press Enter, to open its details: the jobs of the latest run (failed ones first, with the step that failed), who or what started it, when it started and how long it took, and how its recent runs went. Details are fetched only while the panel is open. Esc, a second click or the close button puts the panel away. To go straight to the run on the provider's site, double-click the entry, middle-click it, or press Ctrl+Enter on it (Cmd+Enter on macOS), or choose Open run in the panel. When the strip is too narrow, the entries that do not fit collapse into an overflow marker that shows how many of them are failing.
 
 If the network drops, the strip keeps showing the last known result with its age, and marks it as offline. It refreshes immediately when the machine wakes or you reconnect.
 
@@ -198,7 +200,7 @@ These are the checks that cannot be automated here and need a person at a real d
 2. Maximise a window and confirm it stops above the strip (Windows and X11). Switch Placement to Top and confirm the strip moves to the top edge and maximised windows start below it.
 3. With two displays at different scales, choose the other display: the strip sits flush against that display's taskbar (or top edge) with no gap, and its details open on that display. Quit and start again, and confirm it is still flush and the first display's work area is whole.
 4. Open a fullscreen app and confirm the strip gets out of the way.
-5. Pin a GitHub workflow and a Worker, trigger builds, and watch queued, building and the final state appear. Open each run from the strip.
+5. Pin a GitHub workflow and a Worker, trigger builds, and watch queued, building and the final state appear. Click each entry and confirm its details panel opens beside the strip on the strip's own display, takes the keyboard (Tab reaches Open run, Esc closes it and the strip does not keep focus from your other app afterwards), and shows the jobs and recent runs. Double-click an entry to open its run in the browser.
 6. Re-run a build and confirm the entries do not change order.
 7. Disconnect the network and confirm the entries show their age and an offline note. Sleep and wake the machine and confirm they recover.
 8. Export the profile, import it on a second operating system, and confirm the same targets in the same order after you supply local tokens.

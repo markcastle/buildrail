@@ -116,7 +116,8 @@ pub struct StripEntry {
     /// Facts for the hover / keyboard-focus detail popup, one per line.
     pub details: Vec<String>,
     /// The sentence under the facts that says what activating the entry
-    /// does ("Click or press Enter to open the latest run."), if anything.
+    /// does ("Click or press Enter for details. Double-click to open the
+    /// run.").
     pub hint: Option<String>,
     /// Full sentence for screen readers, e.g.
     /// "Keevoro, GitHub, Failed, branch main, commit a7c412e, 2 minutes ago".
@@ -181,7 +182,7 @@ impl StripModel {
 }
 
 /// The short word for a stale reason, used in notes.
-fn reason_word(reason: StaleReason) -> &'static str {
+pub(crate) fn reason_word(reason: StaleReason) -> &'static str {
     match reason {
         StaleReason::Offline => "offline",
         StaleReason::AccessDenied => "reconnect needed",
@@ -192,7 +193,7 @@ fn reason_word(reason: StaleReason) -> &'static str {
 }
 
 /// Capitalises the first letter (`offline` → `Offline`).
-fn capitalised(word: &str) -> String {
+pub(crate) fn capitalised(word: &str) -> String {
     let mut chars = word.chars();
     chars.next().map_or_else(String::new, |first| {
         first.to_uppercase().chain(chars).collect()
@@ -200,7 +201,7 @@ fn capitalised(word: &str) -> String {
 }
 
 /// One line describing what the watch points at.
-fn target_line(target: &WatchTarget) -> String {
+pub(crate) fn target_line(target: &WatchTarget) -> String {
     match target {
         WatchTarget::GitHub {
             owner,
@@ -301,13 +302,16 @@ fn entry(watch: &Watch, snapshot: &WatchSnapshot, now: DateTime<Utc>) -> StripEn
             details.push(note.clone());
         }
     }
-    let hint = if needs_reconnect {
-        Some("Click or press Enter to reconnect in Settings.".to_owned())
-    } else if record.is_some() {
-        Some("Click or press Enter to open the latest run.".to_owned())
-    } else {
-        None
-    };
+    let hint = Some(
+        if needs_reconnect {
+            "Click or press Enter to see what is wrong and reconnect."
+        } else if record.is_some() {
+            "Click or press Enter for details. Double-click to open the run."
+        } else {
+            "Click or press Enter for details."
+        }
+        .to_owned(),
+    );
 
     let mut spoken = vec![
         watch.label.clone(),
@@ -476,7 +480,7 @@ mod tests {
         );
         assert_eq!(
             e.hint.as_deref(),
-            Some("Click or press Enter to open the latest run.")
+            Some("Click or press Enter for details. Double-click to open the run.")
         );
         assert_eq!(
             e.url.as_deref(),
@@ -530,7 +534,10 @@ mod tests {
         assert_eq!(empty.accessible_name, "Site, Cloudflare, No runs yet");
         assert_eq!(empty.url, None);
         assert_eq!(empty.details, vec!["Cloudflare · Worker w"]);
-        assert_eq!(empty.hint, None);
+        assert_eq!(
+            empty.hint.as_deref(),
+            Some("Click or press Enter for details.")
+        );
 
         let denied = one(
             cf("w", "Site"),
@@ -549,7 +556,7 @@ mod tests {
         assert_eq!(denied.accessible_name, "Site, Cloudflare, Reconnect needed");
         assert_eq!(
             denied.hint.as_deref(),
-            Some("Click or press Enter to reconnect in Settings.")
+            Some("Click or press Enter to see what is wrong and reconnect.")
         );
     }
 

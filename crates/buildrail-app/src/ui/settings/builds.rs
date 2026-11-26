@@ -85,8 +85,27 @@ impl SettingsWindow {
                     )),
                     CardAction::danger("Remove"),
                 ];
+                let highlighted = self.highlight.as_ref() == Some(&id);
+                let scroll = &mut self.scroll_to_highlight;
                 g.block(|ui| {
+                    let top = ui.cursor().min.y;
                     let clicked = connector_card(ui, tokens, &card, &actions);
+                    if highlighted {
+                        let rect = eframe::egui::Rect::from_x_y_ranges(
+                            ui.max_rect().x_range(),
+                            top..=ui.min_rect().max.y,
+                        )
+                        .expand2(eframe::egui::vec2(10.0, 8.0));
+                        ui.painter().rect_stroke(
+                            rect,
+                            eframe::egui::CornerRadius::same(crate::ui::theme::radius::R10),
+                            eframe::egui::Stroke::new(2.0, tokens.accent),
+                            eframe::egui::StrokeKind::Inside,
+                        );
+                        if std::mem::take(scroll) {
+                            ui.scroll_to_rect(rect, Some(Align::Center));
+                        }
+                    }
                     let input = match clicked {
                         Some(0) => Some(ManageInput::StartRename(id.clone())),
                         Some(1) => Some(ManageInput::MoveUp(id.clone())),

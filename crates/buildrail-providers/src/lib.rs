@@ -1,6 +1,6 @@
 //! BuildRail provider adapters.
 //!
-//! Implements core's [`RunSource`] port for
+//! Implements core's [`RunSource`] and [`RunDetailsSource`] ports for
 //!
 //! * GitHub Actions – [`github::GitHubActions`], and
 //! * Cloudflare Workers Builds – [`cloudflare::CloudflareBuilds`],
@@ -38,7 +38,7 @@
 use std::sync::Arc;
 
 use buildrail_core::domain::ProviderKind;
-use buildrail_core::ports::{Clock, RunSource};
+use buildrail_core::ports::{Clock, RunDetailsSource, RunSource};
 
 mod cache;
 pub mod catalog;
@@ -92,6 +92,15 @@ impl ProviderSet {
     }
 }
 
+impl ProviderSet {
+    /// Every details source, one per [`ProviderKind`]. They are the same
+    /// adapters as [`Self::run_sources`], so they share the HTTP client and
+    /// Cloudflare's Worker tag cache.
+    pub fn details_sources(&self) -> Vec<Arc<dyn RunDetailsSource>> {
+        vec![self.github.clone(), self.cloudflare.clone()]
+    }
+}
+
 /// Shorthand for [`ProviderSet::new`]`(..).run_sources()`.
 pub fn registry(client: reqwest::Client, clock: Arc<dyn Clock>) -> Vec<Arc<dyn RunSource>> {
     ProviderSet::new(client, clock).run_sources()
@@ -118,6 +127,11 @@ mod tests {
             ProviderKind::GitHub
         );
         assert_eq!(registry(client, Arc::new(SystemClock)).len(), 2);
+        let details: Vec<_> = set.details_sources().iter().map(|s| s.provider()).collect();
+        assert_eq!(
+            details,
+            vec![ProviderKind::GitHub, ProviderKind::Cloudflare]
+        );
         assert!(USER_AGENT.starts_with("buildrail/"));
     }
 }

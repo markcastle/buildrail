@@ -69,6 +69,14 @@ impl GitHubActions {
         self
     }
 
+    pub(super) fn base_url(&self) -> &str {
+        &self.base_url
+    }
+
+    pub(super) fn transport(&self) -> &Transport {
+        &self.transport
+    }
+
     async fn first_failed_job(
         &self,
         owner: &str,

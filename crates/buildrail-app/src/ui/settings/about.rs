@@ -137,7 +137,7 @@ impl SettingsWindow {
             );
             g.row(
                 "Keyboard",
-                Some("On the strip, Tab moves between builds, and Enter or Space opens the latest run. Hover or focus shows the details. When a new version is ready, Enter on Update opens this page."),
+                Some("On the strip, Tab or the arrow keys move between builds, and hover or focus shows a short summary. Click, or press Enter or Space, to open a build's details; Esc closes them. Double-click, middle-click or Ctrl+Enter opens the run straight away. When a new version is ready, Enter on Update opens this page."),
                 |_| {},
             );
             if controller.logs_dir().is_some() {

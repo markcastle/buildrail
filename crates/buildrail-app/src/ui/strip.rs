@@ -25,7 +25,13 @@
 //! only pushes builds into the overflow when they would not fit beside
 //! it.
 //!
-//! Hover or keyboard focus reveals an entry's details. The strip window is
+//! Activating an entry (click, Enter or Space) pins its details panel
+//! ([`super::details`]) until it is closed (the entry again, Escape, the
+//! strip's ground or the panel's close button); double-click,
+//! middle-click and Ctrl+Enter open the run straight away.
+//!
+//! Hover or keyboard focus reveals an entry's summary card (never over the
+//! entry's own pinned panel). The strip window is
 //! only 24 px tall, so details (and the overflow list) open in their own
 //! small, non-activating viewport, away from the screen edge the strip is
 //! docked to; in single-window test harnesses egui embeds them as windows
@@ -40,21 +46,24 @@
 //! place a pop-up: when to paint next is decided by
 //! [`RepaintPlanner`](crate::presentation::RepaintPlanner).
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
+use buildrail_core::domain::WatchId;
 use eframe::egui::{
-    self, pos2, CornerRadius, Frame, Galley, Label, Margin, Pos2, Rect, Role, Sense, Stroke,
-    StrokeKind, Ui, Vec2, ViewportBuilder, ViewportId, WidgetInfo, WidgetText,
+    self, pos2, CornerRadius, Frame, Galley, Key, Label, Margin, PointerButton, Pos2, Rect, Role,
+    Sense, Stroke, StrokeKind, Ui, Vec2, ViewportBuilder, ViewportId, WidgetInfo, WidgetText,
 };
 
 use buildrail_platform::geometry::{MonitorInfo, PhysicalRect};
 
+use super::details::{details_panel, PanelState, PANEL_WIDTH};
 use super::glyphs::{paint_gear, paint_icon, paint_plus, paint_provider_mark};
 use super::theme::{radius, type_style, Tokens, TypeStyle};
 use super::widgets::{self, button, icon_button_at, ButtonKind};
 use crate::presentation::{
-    fit, popup_rect, provider_mark, OverflowGroup, PopupAlign, PopupPlacement, PopupRequest,
-    PopupStep, StripEntry, StripModel, StripSide, UpdateChip,
+    fit, popup_rect, provider_mark, DetailsModel, OverflowGroup, PanelAction, PopupAlign,
+    PopupPlacement, PopupRequest, PopupStep, StripEntry, StripModel, StripSide, UpdateChip,
 };
 
 /// Height of the strip in logical pixels (points).
@@ -87,8 +96,21 @@ const CARD_MARGIN: f32 = 10.0;
 /// What the user asked for on the strip.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StripAction {
-    /// Open this run page.
+    /// Open this page in the browser: a run (double-click, middle-click or
+    /// Ctrl+Enter on an entry, or the details panel's Open run), a job or
+    /// a recent run from the panel.
     Open(String),
+    /// Show this build's details panel, pinned until closed (a click, or
+    /// Enter or Space, on its entry).
+    ShowDetails(WatchId),
+    /// Close the details panel.
+    CloseDetails,
+    /// The panel's Refresh now: check the build and fetch its details.
+    RefreshDetails,
+    /// The panel's Try again, after its details could not be loaded.
+    RetryDetails,
+    /// The panel's Edit in Settings: Settings › Builds on this build.
+    EditBuild(WatchId),
     /// Open Settings.
     OpenSettings,
     /// Open Settings on the Add-build wizard.
@@ -116,6 +138,19 @@ pub struct StripView {
     update_card: UpdateCardState,
     surroundings: Surroundings,
     popups: Popups,
+    panel: PanelState,
+    /// The build the panel state belongs to.
+    panel_for: Option<WatchId>,
+    /// Where each visible entry was drawn this frame (the panel's anchor),
+    /// and its widget id (to give focus back).
+    entries: HashMap<WatchId, (Rect, egui::Id)>,
+    /// The overflow button, the anchor of a hidden build's panel.
+    overflow_anchor: Option<Rect>,
+    /// The panel was opened from the keyboard on this entry: closing it
+    /// gives the entry its focus back.
+    return_focus: Option<WatchId>,
+    /// Give this entry keyboard focus on the next frame.
+    refocus: Option<WatchId>,
 }
 
 /// Where the strip sits, for its pop-ups and its edge line.
@@ -140,17 +175,23 @@ impl PopupSlot {
     }
 }
 
-/// The three pop-up windows.
+/// The four pop-up windows.
 #[derive(Debug, Default)]
 struct Popups {
     details: PopupSlot,
     update: PopupSlot,
     overflow: PopupSlot,
+    panel: PopupSlot,
 }
 
 impl Popups {
-    fn slots(&mut self) -> [&mut PopupSlot; 3] {
-        [&mut self.details, &mut self.update, &mut self.overflow]
+    fn slots(&mut self) -> [&mut PopupSlot; 4] {
+        [
+            &mut self.details,
+            &mut self.update,
+            &mut self.overflow,
+            &mut self.panel,
+        ]
     }
 
     fn begin_frame(&mut self) {
@@ -193,11 +234,23 @@ fn galley(ui: &Ui, style: TypeStyle, text: &str, color: egui::Color32) -> Arc<Ga
     widgets::text(ui, style, text, color)
 }
 
+/// What a hidden build chosen in the overflow list does: show its
+/// details, like a click on its entry.
 fn action_for(entry: &StripEntry) -> Option<StripAction> {
-    match (&entry.url, entry.needs_reconnect) {
-        (_, true) => Some(StripAction::Reconnect(entry.watch_id.clone())),
-        (Some(url), false) => Some(StripAction::Open(url.clone())),
-        (None, false) => None,
+    Some(StripAction::ShowDetails(entry.watch_id.clone()))
+}
+
+/// Maps what the panel asked for to a strip action for `watch`.
+fn panel_action(action: PanelAction, watch: &WatchId) -> Option<StripAction> {
+    match action {
+        PanelAction::Open(url) => Some(StripAction::Open(url)),
+        PanelAction::Reconnect => Some(StripAction::Reconnect(watch.clone())),
+        PanelAction::Refresh => Some(StripAction::RefreshDetails),
+        PanelAction::Retry => Some(StripAction::RetryDetails),
+        PanelAction::EditInSettings => Some(StripAction::EditBuild(watch.clone())),
+        PanelAction::Close => Some(StripAction::CloseDetails),
+        // Copied by the panel itself.
+        PanelAction::CopyLink(_) => None,
     }
 }
 
@@ -237,27 +290,87 @@ impl StripView {
         self.surroundings.side
     }
 
-    /// Draws the strip in the top `STRIP_HEIGHT` points of `ui` and returns
-    /// what the user asked for. `movable` makes the caption a drag handle;
-    /// `phase` is the in-progress glyph's animation step (`0` = at rest).
+    /// The panel's state (for tests: whether the link was copied).
+    pub fn panel_state(&self) -> &PanelState {
+        &self.panel
+    }
+
+    /// Draws the strip in the top `STRIP_HEIGHT` points of `ui`, and the
+    /// open details panel when `details` is given, and returns what the
+    /// user asked for. `movable` makes the caption a drag handle; `phase`
+    /// is the in-progress glyph's animation step (`0` = at rest).
     pub fn show(
         &mut self,
         ui: &mut Ui,
         model: &StripModel,
+        details: Option<&DetailsModel>,
         tokens: &Tokens,
         movable: bool,
         phase: u32,
     ) -> Vec<StripAction> {
         self.popups.begin_frame();
-        let actions = self.show_strip(ui, model, tokens, movable, phase);
+        self.entries.clear();
+        self.overflow_anchor = None;
+        let pinned = details.map(|d| d.watch_id.clone());
+        let mut actions = self.show_strip(ui, model, pinned.as_ref(), tokens, movable, phase);
+        match details {
+            Some(details) => {
+                if let Some(action) = self.show_panel(ui, details, tokens) {
+                    actions.push(action);
+                }
+            }
+            None => {
+                // A panel asked for this frame opens on the next one: keep
+                // whether it was asked for from the keyboard.
+                self.panel_for = None;
+                self.panel = PanelState {
+                    focus_primary: self.panel.focus_primary,
+                    ..PanelState::default()
+                };
+            }
+        }
+        if actions.contains(&StripAction::CloseDetails) {
+            self.refocus = self.return_focus.take();
+        }
         self.popups.end_frame();
         actions
+    }
+
+    /// Draws the pinned details panel next to its entry (or the overflow
+    /// button, for a hidden build).
+    fn show_panel(
+        &mut self,
+        ui: &mut Ui,
+        details: &DetailsModel,
+        tokens: &Tokens,
+    ) -> Option<StripAction> {
+        if self.panel_for.as_ref() != Some(&details.watch_id) {
+            self.panel = PanelState {
+                focus_primary: self.panel.focus_primary,
+                ..PanelState::default()
+            };
+            self.panel_for = Some(details.watch_id.clone());
+        }
+        let full = ui.max_rect();
+        let anchor = self
+            .entries
+            .get(&details.watch_id)
+            .map(|(rect, _)| *rect)
+            .or(self.overflow_anchor)
+            .unwrap_or(Rect::from_min_size(full.min, Vec2::new(1.0, STRIP_HEIGHT)));
+        let host = PopupHost {
+            surroundings: &self.surroundings,
+            slot: &mut self.popups.panel,
+        };
+        let action = panel_popup(ui.ctx(), details, anchor, tokens, &mut self.panel, host)?;
+        panel_action(action, &details.watch_id)
     }
 
     fn show_strip(
         &mut self,
         ui: &mut Ui,
         model: &StripModel,
+        pinned: Option<&WatchId>,
         tokens: &Tokens,
         movable: bool,
         phase: u32,
@@ -265,6 +378,22 @@ impl StripView {
         let mut actions = Vec::new();
         let full = ui.max_rect();
         let strip = Rect::from_min_size(full.min, Vec2::new(full.width(), STRIP_HEIGHT));
+        // A click on the strip's own ground (not on an entry or a button)
+        // closes the details panel. Not focusable: it is no tab stop.
+        let ground = ui.interact(strip, ui.scope_id().with("strip-ground"), Sense::CLICK);
+        if pinned.is_some() && (ground.clicked() || ui.input(|i| i.key_pressed(Key::Escape))) {
+            actions.push(StripAction::CloseDetails);
+        }
+        if let Some(watch) = self.refocus.take() {
+            // The panel was opened from the keyboard: the keyboard goes
+            // back to its entry (and the strip window) when it closes.
+            let id = ui.scope_id().with(("entry", watch.as_str()));
+            ui.memory_mut(|m| m.request_focus(id));
+            if !ui.ctx().embed_viewports() {
+                ui.ctx()
+                    .send_viewport_cmd_to(ViewportId::ROOT, egui::ViewportCommand::Focus);
+            }
+        }
         let painter = ui.painter_at(strip);
         painter.rect_filled(strip, 0.0, tokens.rail_gradient);
         // The line faces the desktop: under a strip docked at the top.
@@ -394,9 +523,8 @@ impl StripView {
                 x += SPACING;
             }
             let rect = Rect::from_min_size(pos2(x, strip.min.y), Vec2::new(m.width, STRIP_HEIGHT));
-            if let Some(action) = self.entry(ui, rect, entry, m, tokens, phase) {
-                actions.push(action);
-            }
+            let pinned_here = pinned == Some(&entry.watch_id);
+            self.entry(ui, rect, entry, m, tokens, phase, pinned_here, &mut actions);
             x += m.width;
         }
 
@@ -408,6 +536,7 @@ impl StripView {
                 pos2(x, strip.min.y),
                 Vec2::new(overflow_width, STRIP_HEIGHT),
             );
+            self.overflow_anchor = Some(rect);
             let response = ui.interact(rect, ui.scope_id().with("overflow"), Sense::click());
             let name = group.accessible_name();
             response.widget_info(|| WidgetInfo::labeled(Role::Button, true, &name));
@@ -562,6 +691,7 @@ impl StripView {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn entry(
         &mut self,
         ui: &mut Ui,
@@ -570,13 +700,24 @@ impl StripView {
         m: &Measured,
         tokens: &Tokens,
         phase: u32,
-    ) -> Option<StripAction> {
+        pinned_here: bool,
+        actions: &mut Vec<StripAction>,
+    ) {
         let id = ui.scope_id().with(("entry", entry.watch_id.as_str()));
         let response = ui.interact(rect, id, Sense::click());
+        self.entries.insert(entry.watch_id.clone(), (rect, id));
         let name = entry.accessible_name.clone();
         response.widget_info(|| WidgetInfo::labeled(Role::Button, true, &name));
         let painter = ui.painter_at(rect);
-        let lit = pill(&painter, &response, rect, tokens);
+        let lit = pill(&painter, &response, rect, tokens) || pinned_here;
+        if pinned_here && !(response.hovered() || response.has_focus()) {
+            // The pinned entry stays lit while its panel is open.
+            painter.rect_filled(
+                rect.shrink2(Vec2::new(0.0, PILL_INSET)),
+                CornerRadius::same(radius::R6),
+                tokens.bg_hover,
+            );
+        }
         let ground = if lit { tokens.bg_hover } else { tokens.bg };
 
         let y = rect.center().y;
@@ -615,17 +756,39 @@ impl StripView {
             );
         }
 
-        if response.hovered() || response.has_focus() {
+        // The light card is for a glance; never over the entry's own panel.
+        if (response.hovered() || response.has_focus()) && !pinned_here {
             let host = PopupHost {
                 surroundings: &self.surroundings,
                 slot: &mut self.popups.details,
             };
             details(ui.ctx(), entry, rect, tokens, host);
         }
-        if response.clicked() {
-            return action_for(entry);
+
+        // Quick paths to the run, skipping the panel: double-click,
+        // middle-click, Ctrl+Enter (Cmd+Enter on macOS).
+        let ctrl_enter =
+            response.has_focus() && ui.input(|i| i.modifiers.command && i.key_pressed(Key::Enter));
+        if response.double_clicked() || response.middle_clicked() || ctrl_enter {
+            if let Some(url) = &entry.url {
+                actions.push(StripAction::Open(url.clone()));
+            }
+            // The first click of a double-click opened the panel.
+            if pinned_here || response.double_clicked() {
+                actions.push(StripAction::CloseDetails);
+            }
+            return;
         }
-        None
+        if response.clicked() {
+            if pinned_here {
+                actions.push(StripAction::CloseDetails);
+            } else {
+                let keyboard = !response.clicked_by(PointerButton::Primary);
+                self.panel.focus_primary = keyboard;
+                self.return_focus = keyboard.then(|| entry.watch_id.clone());
+                actions.push(StripAction::ShowDetails(entry.watch_id.clone()));
+            }
+        }
     }
 }
 
@@ -803,6 +966,81 @@ fn place_popup(ctx: &egui::Context, placement: &mut PopupPlacement, wanted: &Phy
         PopupStep::Show => ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true)),
         PopupStep::Stay => {}
     }
+}
+
+/// The details panel's window size for a card `height` points tall (0:
+/// not measured yet).
+fn panel_size(height: f32) -> Vec2 {
+    let height = if height > 0.0 { height } else { 320.0 };
+    Vec2::new(PANEL_WIDTH, height.ceil()) + Vec2::splat(2.0 * CARD_MARGIN)
+}
+
+/// The pinned details panel. Unlike the hover card it is a window that
+/// takes focus once shown (the person clicked for it), so Tab, Enter and
+/// Escape work in it. It is measured on its first frame, kept hidden until
+/// then, and placed like every pop-up: on the strip's monitor, away from
+/// the edge the strip is docked to. In a single-window test harness it is
+/// an interactable area under the strip.
+fn panel_popup(
+    ctx: &egui::Context,
+    model: &DetailsModel,
+    anchor: Rect,
+    tokens: &Tokens,
+    state: &mut PanelState,
+    host: PopupHost<'_>,
+) -> Option<PanelAction> {
+    let card = |ui: &mut Ui, state: &mut PanelState| {
+        if ui.input(|i| i.key_pressed(Key::Escape) || i.viewport().close_requested()) {
+            return Some(PanelAction::Close);
+        }
+        Frame::new()
+            .outer_margin(Margin::same(CARD_MARGIN as i8))
+            .show(ui, |ui| details_panel(ui, model, tokens, state))
+            .inner
+    };
+    if ctx.embed_viewports() {
+        let at = pos2((anchor.min.x - CARD_MARGIN).max(0.0), STRIP_HEIGHT);
+        return egui::Area::new(egui::Id::unique("buildrail-details-panel"))
+            .fixed_pos(at)
+            .constrain(false)
+            .order(egui::Order::Foreground)
+            .show(ctx, |ui| card(ui, state))
+            .inner;
+    }
+    let measured = state.height > 0.0;
+    let before = state.height;
+    let size = panel_size(state.height);
+    let target = popup_target(
+        ctx,
+        host.surroundings,
+        anchor.min.x - CARD_MARGIN,
+        PopupAlign::Start,
+        size,
+    );
+    let builder = popup_builder(&model.title, target.guess, size).with_active(true);
+    let placement = host.slot.use_now();
+    let mut action = None;
+    ctx.show_viewport_immediate(
+        ViewportId::from_hash_of("buildrail-details-panel"),
+        builder,
+        |ui, _| {
+            if measured {
+                let shown_before = placement.is_shown();
+                place_popup(ui.ctx(), placement, &target.rect);
+                if placement.is_shown() && !shown_before {
+                    // Clicked for: take focus, so the keyboard reaches it.
+                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::Focus);
+                }
+            }
+            action = card(ui, state);
+        },
+    );
+    if (state.height - before).abs() > 0.5 {
+        // Measured, or its content changed size: one more frame to resize
+        // and place it.
+        ctx.request_repaint();
+    }
+    action
 }
 
 fn popup_builder(title: &str, position: Pos2, size: Vec2) -> ViewportBuilder {

@@ -2,6 +2,10 @@
 //!
 //! * [`GitHubActions`] implements [`RunSource`](buildrail_core::ports::RunSource)
 //!   over `GET /repos/{owner}/{repo}/actions/workflows/{workflow}/runs`.
+//! * The same [`GitHubActions`] implements
+//!   [`RunDetailsSource`](buildrail_core::ports::RunDetailsSource): one
+//!   attempt's title, trigger, timings and jobs, for the details panel
+//!   (see `details.rs`; two requests per panel open).
 //! * [`GitHubCatalog`] implements the GitHub catalogue traits for the
 //!   "Add build" picker.
 //!
@@ -27,10 +31,12 @@
 //!   the rate limit), so [`GitHubActions`] caches `ETag`s.
 
 mod catalog;
+mod details;
 mod runs;
 pub mod status;
 
 pub use catalog::GitHubCatalog;
+pub use details::{JOBS_PER_PAGE, MAX_JOB_PAGES};
 pub use runs::{GitHubActions, DEFAULT_RUN_LIMIT};
 
 /// Production GitHub REST API base URL.

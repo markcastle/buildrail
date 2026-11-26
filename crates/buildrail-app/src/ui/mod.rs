@@ -9,7 +9,10 @@
 //! * [`glyphs`] – vector glyphs in the lucide manner and provider marks.
 //! * [`icon`] – the BuildRail mark (window icon; source of the `.ico`).
 //! * [`widgets`] – small widgets, one per Task Rail component.
-//! * [`strip`] – the 24 px strip widget (entries, overflow, detail popup).
+//! * [`strip`] – the 24 px strip widget (entries, overflow, the hover
+//!   card, and the window that holds a build's details panel).
+//! * [`details`] – the details panel's content, drawn from
+//!   [`DetailsModel`](crate::presentation::DetailsModel).
 //! * [`settings`] – the Settings window (navigation, pages, wizard, import).
 //! * [`app`] – [`BuildRailUi`], one frame of the whole UI; used by the real
 //!   window and by `egui_kittest` tests alike.
@@ -17,6 +20,7 @@
 //!   part that needs a real window.
 
 pub mod app;
+pub mod details;
 pub mod fonts;
 pub mod glyphs;
 pub mod icon;
