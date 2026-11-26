@@ -33,6 +33,7 @@ pub type Snapshots = Arc<[WatchSnapshot]>;
 enum Command {
     SetWatches(Vec<Watch>),
     RefreshNow,
+    RefreshOne(RequestKey),
     Shutdown,
 }
 
@@ -66,6 +67,14 @@ impl RefreshHandle {
     /// an OS wake notification. Rate-limit pauses are still honoured.
     pub fn refresh_now(&self) -> Result<(), EngineStopped> {
         self.send(Command::RefreshNow)
+    }
+
+    /// Refreshes the one request behind `key` now and forgets its failure
+    /// backoff (a person pressed Refresh in a build's details). Every
+    /// watch sharing that request is refreshed with it; others keep their
+    /// timing. Rate-limit pauses are still honoured.
+    pub fn refresh_request(&self, key: RequestKey) -> Result<(), EngineStopped> {
+        self.send(Command::RefreshOne(key))
     }
 
     /// Asks the engine to stop. In-flight requests are abandoned.
@@ -177,6 +186,7 @@ impl RefreshEngine {
                     None | Some(Command::Shutdown) => break,
                     Some(Command::SetWatches(watches)) => self.set_watches(watches),
                     Some(Command::RefreshNow) => self.schedule.refresh_all(Instant::now()),
+                    Some(Command::RefreshOne(key)) => self.schedule.refresh_one(&key, Instant::now()),
                 },
                 Some(joined) = self.in_flight.join_next_with_id() => self.complete(joined),
                 () = tokio::time::sleep_until(wake_at) => {}

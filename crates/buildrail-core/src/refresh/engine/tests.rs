@@ -517,6 +517,29 @@ async fn refresh_now_fetches_immediately_and_clears_backoff() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn refresh_request_fetches_only_that_request_now() {
+    let t0 = Instant::now();
+    let h = Harness::start();
+    h.github.reply("a", vec![network()]);
+    h.github.reply("b", vec![network()]);
+    h.handle
+        .set_watches(vec![gh("w", "work", "a"), gh("v", "work", "b")])
+        .unwrap();
+    until(t0, 40).await;
+    assert_eq!(h.github.calls_to("a"), vec![0, 30]);
+    let key = RequestKey::from(&gh("w", "work", "a"));
+    h.handle.refresh_request(key).unwrap();
+    until(t0, 41).await;
+    assert_eq!(h.github.calls_to("a"), vec![0, 30, 40]);
+    assert_eq!(h.github.calls_to("b"), vec![0, 30], "others keep their timing");
+    // An unknown request is ignored.
+    let unknown = RequestKey::from(&gh("x", "work", "zzz"));
+    h.handle.refresh_request(unknown).unwrap();
+    until(t0, 42).await;
+    assert!(h.github.calls_to("zzz").is_empty());
+}
+
+#[tokio::test(start_paused = true)]
 async fn wall_clock_jump_is_treated_as_wake() {
     let t0 = Instant::now();
     let h = Harness::start();
